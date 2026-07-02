@@ -1,0 +1,27 @@
+# Virtual Environment
+Physics1/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# VSCode
+.vscode/
+
+# Qt
+*.ui.autosave
+
+# Build
+build/
+dist/
+
+# Logs
+*.log
+
+# Measurements
+data/
+*.csv
+*.txt
+rheed_recordings/
