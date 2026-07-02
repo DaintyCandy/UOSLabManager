@@ -87,7 +87,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("Experiment Interface (LabVIEW Style)")
+        self.setWindowTitle("UOSLabManager v1.0")
         self.resize(1300, 800)
 
         self.manager = DeviceManager()
