@@ -22,9 +22,9 @@ except ImportError:
 from device_manager import DeviceManager
 from lakeshore331 import LakeShore331
 from keithley2400 import Keithley2400
+from zup36_12 import ZUP36_12
 
-from gui_panels.panel_lakeshore import LakeshorePanel
-from gui_panels.panel_keithley import KeithleyPanel
+from gui_panels.panel_sequence import SequencePanel
 
 # ==========================================
 # LabVIEW 스타일 CSS (QSS) - 교수님 취향 반영
@@ -83,11 +83,46 @@ QHeaderView::section {
 }
 """
 
+# --- 아이폰 스타일의 On/Off 스위치 클래스 ---
+class ToggleSwitch(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(60, 28)
+        self.update_style()
+        self.toggled.connect(self.update_style)
+
+    def update_style(self):
+        if self.isChecked():
+            # ON 상태: 초록색 배경
+            self.setText("ON")
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #4CD964; 
+                    color: white; 
+                    border-radius: 14px; 
+                    font-weight: bold; 
+                    border: 1px solid #3eb452;
+                }
+            """)
+        else:
+            # OFF 상태: 빨간색 배경
+            self.setText("OFF")
+            self.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF3B30; 
+                    color: white; 
+                    border-radius: 14px; 
+                    font-weight: bold; 
+                    border: 1px solid #d32f2f;
+                }
+            """)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle("UOSLabManager v1.0")
+        self.setWindowTitle("Experiment Interface (LabVIEW Style)")
         self.resize(1300, 800)
 
         self.manager = DeviceManager()
@@ -123,40 +158,39 @@ class MainWindow(QMainWindow):
             | QMainWindow.DockOption.AnimatedDocks
         )
 
-        # 패널 먼저 생성 (에러 해결 핵심)
+        # 패널 생성
         self.device_panel = self.create_device_panel()
         self.plot_panel = self.create_plot_panel()
-        self.table_panel = self.create_table_panel()
+        self.table_panel = self.create_table_panel() # 테이블 패널
         self.sequence_panel = self.create_sequence_panel()
         self.rheed_panel = self.create_rheed_panel()
 
-        center_panel = QWidget()
-        center_layout = QVBoxLayout(center_panel)
-        center_label = QLabel("Use the toolbar to show, hide, and arrange panels.")
-        center_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(center_label)
-        self.setCentralWidget(center_panel)
+        # --- [수정] 테이블 패널을 도크가 아닌 메인 화면 중앙에 배치 ---
+        self.setCentralWidget(self.table_panel)
 
+        # 도크 생성 (테이블 도크는 제외)
         self.device_dock = self.create_dock("Instrument Communication", self.device_panel)
         self.plot_dock = self.create_dock("Real-time Plot", self.plot_panel)
-        self.table_dock = self.create_dock("Measurement Table", self.table_panel)
         self.sequence_dock = self.create_dock("Sequence / Control", self.sequence_panel)
         self.rheed_dock = self.create_dock("RHEED Recording", self.rheed_panel)
 
+        # 도크 배치
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.device_dock)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.plot_dock)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.table_dock)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.sequence_dock)
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.rheed_dock)
-
-        self.splitDockWidget(self.device_dock, self.plot_dock, Qt.Orientation.Horizontal)
-        self.splitDockWidget(self.sequence_dock, self.rheed_dock, Qt.Orientation.Vertical)
-        self.resizeDocks([self.device_dock], [360], Qt.Orientation.Horizontal)
-        self.resizeDocks([self.table_dock], [260], Qt.Orientation.Vertical)
         
-        # 패널들이 모두 만들어진 후 툴바 생성
+        # Plot을 Communication 아래에 배치
+        self.splitDockWidget(self.device_dock, self.plot_dock, Qt.Orientation.Vertical)
+        # Rheed를 Sequence 아래에 배치
+        self.splitDockWidget(self.sequence_dock, self.rheed_dock, Qt.Orientation.Vertical)
+
+        # 초기 너비 조정
+        self.resizeDocks([self.device_dock], [380], Qt.Orientation.Horizontal)
+        
         self.create_toolbar()
         self.add_panel_toolbar_actions()
+        
+        # 시작할 때 테이블 열 숨기기 초기화
+        self.update_device_status()
 
     def create_toolbar(self):
         self.toolbar = QToolBar("Main Toolbar")
@@ -188,7 +222,6 @@ class MainWindow(QMainWindow):
         panel_actions = [
             ("COMM", self.device_dock),
             ("PLOT", self.plot_dock),
-            ("TABLE", self.table_dock),
             ("CTRL", self.sequence_dock),
             ("RHEED", self.rheed_dock),
         ]
@@ -215,42 +248,62 @@ class MainWindow(QMainWindow):
 
         group = QGroupBox("Device Manager")
         glayout = QGridLayout(group)
+        glayout.setColumnStretch(1, 1)
 
-        self.ls_port_input = QLineEdit("/dev/cu.usbserial-A9EQ7W68")
-        self.k2400_addr_input = QLineEdit("GPIB0::24::INSTR")
-
-        self.ls_connect_btn = QPushButton("Connect LS331")
-        self.ls_disconnect_btn = QPushButton("Disconnect LS331")
-        self.k_connect_btn = QPushButton("Connect K2400")
-        self.k_disconnect_btn = QPushButton("Disconnect K2400")
-        self.disconnect_all_btn = QPushButton("Disconnect All")
-        self.disconnect_all_btn.setStyleSheet("background-color: #FF6666;") # 비상 정지는 붉은색
-
-        self.ls_connect_btn.clicked.connect(self.connect_ls331)
-        self.ls_disconnect_btn.clicked.connect(self.disconnect_ls331)
-        self.k_connect_btn.clicked.connect(self.connect_k2400)
-        self.k_disconnect_btn.clicked.connect(self.disconnect_k2400)
-        self.disconnect_all_btn.clicked.connect(self.disconnect_all)
-
+        # 1. LS331 Port
+        self.ls_port_input = QLineEdit("/dev/cu.usbserial-A9EQ7W68") # 윈도우/맥 환경에 맞게 기본값 수정 필요
+        self.ls_port_input.setMinimumWidth(220)
+        self.ls_switch = ToggleSwitch()
+        
         glayout.addWidget(QLabel("LS331 Port:"), 0, 0)
         glayout.addWidget(self.ls_port_input, 0, 1)
-        glayout.addWidget(self.ls_connect_btn, 0, 2)
-        glayout.addWidget(self.ls_disconnect_btn, 0, 3)
+        glayout.addWidget(self.ls_switch, 0, 2)
 
-        glayout.addWidget(QLabel("K2400 Addr:"), 1, 0)
+        # 2. K2400 Port (Addr에서 Port로 명칭 변경)
+        self.k2400_addr_input = QLineEdit("GPIB0::24::INSTR") # 윈도우/맥 환경에 맞게 기본값 수정 필요
+        self.k_switch = ToggleSwitch()
+
+        glayout.addWidget(QLabel("K2400 Port:"), 1, 0) # 이 부분 수정됨
         glayout.addWidget(self.k2400_addr_input, 1, 1)
-        glayout.addWidget(self.k_connect_btn, 1, 2)
-        glayout.addWidget(self.k_disconnect_btn, 1, 3)
-        glayout.addWidget(self.disconnect_all_btn, 2, 0, 1, 4)
-        
+        glayout.addWidget(self.k_switch, 1, 2)
+
+        # --- [추가] 3. ZUP36-12 Port ---
+        self.zup_port_input = QLineEdit("/dev/cu.usbserial-A9EQ7W68") # 윈도우/맥 환경에 맞게 기본값 수정 필요
+        self.zup_switch = ToggleSwitch()
+
+        glayout.addWidget(QLabel("ZUP Port:"), 2, 0)
+        glayout.addWidget(self.zup_port_input, 2, 1)
+        glayout.addWidget(self.zup_switch, 2, 2)
+
         layout.addWidget(group)
 
-        self.device_status_table = QTableWidget()
-        self.device_status_table.setColumnCount(2)
-        self.device_status_table.setHorizontalHeaderLabels(["Device", "Status"])
-        layout.addWidget(self.device_status_table)
+        self.ls_switch.clicked.connect(self.handle_ls_toggle)
+        self.k_switch.clicked.connect(self.handle_k_toggle)
+        self.zup_switch.clicked.connect(self.handle_zup_toggle) # [추가]
 
+        # 3. System Log
+        layout.addWidget(QLabel("<b>System Log</b>"))
+        self.log_box = QTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setStyleSheet("background-color: #000000; color: #00FF00; font-family: monospace; font-size: 9pt;")
+        self.log_box.setFixedHeight(180) # 세로 크기 축소
+        layout.addWidget(self.log_box)
+
+        layout.addStretch(1) # 로그박스 아래 공백을 채워 위로 밀착시킴
         return panel
+
+    # --- 스위치 전용 핸들러 함수 추가 ---
+    def handle_ls_toggle(self, checked):
+        if checked: self.connect_ls331()
+        else: self.disconnect_ls331()
+
+    def handle_k_toggle(self, checked):
+        if checked: self.connect_k2400()
+        else: self.disconnect_k2400()
+
+    def handle_zup_toggle(self, checked):
+        if checked: self.connect_zup()
+        else: self.disconnect_zup()
 
     def create_plot_panel(self):
         panel = QWidget()
@@ -290,93 +343,135 @@ class MainWindow(QMainWindow):
         layout.addLayout(header_layout)
 
         self.data_table = QTableWidget()
-        self.data_table.setColumnCount(7)
+        self.data_table.setColumnCount(9)
         self.data_table.setHorizontalHeaderLabels([
-            "datetime", "elapsed_s", "LS331_A_K", "LS331_B_K",
-            "LS331_setpoint_K", "K2400_voltage_V", "K2400_current_A",
+            "datetime", "elapsed_s",
+            "LS331_A_K", "LS331_B_K", "LS331_setpoint_K",
+            "K2400_voltage_V", "K2400_current_A",
+            "ZUP_voltage_V", "ZUP_current_A"
         ])
         layout.addWidget(self.data_table)
         return panel
 
     def create_sequence_panel(self):
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        
-        # --- LS331 컨트롤 파트 (교체됨) ---
-        self.lakeshore_panel = LakeshorePanel(self.manager, self.log)
-        layout.addWidget(self.lakeshore_panel)
-
-        # --- K2400 컨트롤 파트 (교체됨) ---
-        self.keithley_panel = KeithleyPanel(self.manager, self.log)
-        layout.addWidget(self.keithley_panel)
-
-        # --- 로그 박스 파트 (다시 추가) ---
-        self.log_box = QTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(150) # 로그박스 크기 조절
-        layout.addWidget(QLabel("Log"))
-        layout.addWidget(self.log_box)
-
-        return panel  # <--- 이 리턴 문이 없으면 화면에 아무것도 안 나옵니다!
+        # 복잡한 버튼들을 다 지우고, panel_sequence.py에서 만든 
+        # SequencePanel 객체 하나만 딱 넣습니다.
+        self.sequence_builder = SequencePanel(self.manager, self.log)
+        return self.sequence_builder
 
     def create_rheed_panel(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(5, 5, 5, 5) # 패널 테두리 여백 최소화
+
         group = QGroupBox("RHEED Camera / Recording")
         glayout = QVBoxLayout(group)
+        glayout.setSpacing(8) # 위젯 간 간격 좁게
 
+        # 1. 상단 설정 라인 (Source & FPS 한 줄 배치)
+        top_layout = QHBoxLayout()
+        
+        top_layout.addWidget(QLabel("Source:"))
         self.rheed_source_input = QLineEdit("0")
+        self.rheed_source_input.setFixedWidth(40) # 입력창 크기 고정
+        top_layout.addWidget(self.rheed_source_input)
+
+        top_layout.addSpacing(15) # 간격 벌리기
+
+        top_layout.addWidget(QLabel("FPS:"))
         self.rheed_fps_spin = QDoubleSpinBox()
         self.rheed_fps_spin.setValue(30.0)
-        self.rheed_dir_label = QLabel(self.rheed_output_dir)
+        self.rheed_fps_spin.setFixedWidth(60)
+        top_layout.addWidget(self.rheed_fps_spin)
+        
+        top_layout.addStretch(1) # 오른쪽 빈 공간 채우기
+        glayout.addLayout(top_layout)
 
-        source_layout = QHBoxLayout()
-        source_layout.addWidget(QLabel("Source:"))
-        source_layout.addWidget(self.rheed_source_input)
-        source_layout.addWidget(QLabel("FPS:"))
-        source_layout.addWidget(self.rheed_fps_spin)
-        glayout.addLayout(source_layout)
-
+        # 2. 카메라 프리뷰 영역 (크기 약간 축소)
         self.rheed_preview_label = QLabel("No RHEED preview")
         self.rheed_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.rheed_preview_label.setMinimumHeight(180)
-        self.rheed_preview_label.setStyleSheet("background: #111; color: #ddd; border: 2px inset #555;")
+        self.rheed_preview_label.setMinimumHeight(160) # 높이 최적화
+        self.rheed_preview_label.setStyleSheet("""
+            background: #000; 
+            color: #777; 
+            border: 2px inset #555; 
+            font-weight: bold;
+        """)
         glayout.addWidget(self.rheed_preview_label)
 
-        btn_layout = QGridLayout()
-        self.rheed_choose_dir_btn = QPushButton("Choose Save Folder")
+        # 3. 저장 폴더 라인 (경로창 + 버튼 한 줄 배치)
+        folder_layout = QHBoxLayout()
+        folder_layout.addWidget(QLabel("Path:"))
+        
+        # 라벨 대신 읽기 전용 QLineEdit 사용 (더 깔끔함)
+        self.rheed_dir_display = QLineEdit(self.rheed_output_dir)
+        self.rheed_dir_display.setReadOnly(True)
+        self.rheed_dir_display.setStyleSheet("background-color: #EEE; color: #555; font-size: 9pt;")
+        folder_layout.addWidget(self.rheed_dir_display)
+
+        self.rheed_choose_dir_btn = QPushButton("Choose")
+        self.rheed_choose_dir_btn.setFixedWidth(65)
+        self.rheed_choose_dir_btn.clicked.connect(self.choose_rheed_output_dir)
+        folder_layout.addWidget(self.rheed_choose_dir_btn)
+        
+        glayout.addLayout(folder_layout)
+
+        # 4. 제어 버튼 라인 (Start / Stop Preview 한 줄 배치)
+        btn_ctrl_layout = QHBoxLayout()
         self.rheed_start_preview_btn = QPushButton("Start Preview")
         self.rheed_stop_preview_btn = QPushButton("Stop Preview")
-        self.rheed_record_btn = QPushButton("Start Recording")
-        self.rheed_record_btn.setStyleSheet("background-color: #FF9999;") # 녹화버튼 약간 붉게
-
-        self.rheed_choose_dir_btn.clicked.connect(self.choose_rheed_output_dir)
+        
+        # 버튼 높이 조절
+        self.rheed_start_preview_btn.setFixedHeight(30)
+        self.rheed_stop_preview_btn.setFixedHeight(30)
+        
         self.rheed_start_preview_btn.clicked.connect(self.start_rheed_preview)
         self.rheed_stop_preview_btn.clicked.connect(self.stop_rheed_preview)
-        self.rheed_record_btn.clicked.connect(self.toggle_rheed_recording)
-
-        btn_layout.addWidget(QLabel("Save Folder:"), 0, 0)
-        btn_layout.addWidget(self.rheed_dir_label, 0, 1, 1, 3)
-        btn_layout.addWidget(self.rheed_choose_dir_btn, 1, 0, 1, 4)
-        btn_layout.addWidget(self.rheed_start_preview_btn, 2, 0, 1, 2)
-        btn_layout.addWidget(self.rheed_stop_preview_btn, 2, 2, 1, 2)
-        btn_layout.addWidget(self.rheed_record_btn, 3, 0, 1, 4)
         
-        glayout.addLayout(btn_layout)
-        layout.addWidget(group)
+        btn_ctrl_layout.addWidget(self.rheed_start_preview_btn)
+        btn_ctrl_layout.addWidget(self.rheed_stop_preview_btn)
+        glayout.addLayout(btn_ctrl_layout)
 
+        # 5. 녹화 버튼 (하단에 강조)
+        self.rheed_record_btn = QPushButton("Start Recording")
+        self.rheed_record_btn.setFixedHeight(35)
+        self.rheed_record_btn.setStyleSheet("background-color: #FF9999; font-weight: bold; border: 2px outset #FFFFFF;")
+        self.rheed_record_btn.clicked.connect(self.toggle_rheed_recording)
+        glayout.addWidget(self.rheed_record_btn)
+
+        layout.addWidget(group)
         return panel
 
-    # --- 통신 및 원래 백엔드 로직 (수정 안 함, 그대로 유지) ---
+    # --- 추가 수정: 폴더 선택 시 화면 업데이트 함수 ---
+    def choose_rheed_output_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "Choose RHEED Save Folder", self.rheed_output_dir)
+        if path:
+            self.rheed_output_dir = path
+            self.rheed_dir_display.setText(path) # display 위젯 업데이트
+            self.log(f"RHEED save folder changed: {path}")
+
     def connect_ls331(self):
         try:
             if self.manager.get_device("LS331") is not None:
                 return
             port = self.ls_port_input.text().strip()
-            self.manager.add_device("LS331", LakeShore331(port))
+            
+            # 1. 객체 생성
+            ls = LakeShore331(port)
+            
+            # --- [안전 기능 추가] 장비 연결 즉시 램프 강제 종료 ---
+            time.sleep(0.2) # 통신 안정화를 위한 미세 대기
+            ls.write("MODE 1")      # Remote 모드 활성화
+            time.sleep(0.2)
+            ls.write("RAMP 1,0,1.0") # Loop 1의 램프를 Off(0)로 설정
+            self.log(">>> LS331 Safety Init: Ramp Forced OFF.")
+            # ------------------------------------------------
+            
+            self.manager.add_device("LS331", ls)
             self.log(f"LS331 connected: {port}")
             self.start_timer()
             self.update_device_status()
+            
         except Exception as e:
             QMessageBox.critical(self, "LS331 Error", str(e))
 
@@ -404,6 +499,27 @@ class MainWindow(QMainWindow):
         self.update_device_status()
         self.stop_timer_if_empty()
 
+    def connect_zup(self):
+        try:
+            if self.manager.get_device("ZUP") is not None: return
+            port = self.zup_port_input.text().strip()
+            
+            zup = ZUP36_12(port) # 우리가 만든 클래스로 연결
+            self.manager.add_device("ZUP", zup)
+            
+            self.log(f"ZUP36-12 connected: {port}")
+            self.start_timer()
+            self.update_device_status()
+        except Exception as e:
+            QMessageBox.critical(self, "ZUP Error", str(e))
+            self.update_device_status() # 에러 시 스위치 되돌리기
+
+    def disconnect_zup(self):
+        self.manager.remove_device("ZUP")
+        self.log("ZUP36-12 disconnected")
+        self.update_device_status()
+        self.stop_timer_if_empty()
+
     def disconnect_all(self):
         self.timer.stop()
         self.manager.close_all()
@@ -419,21 +535,57 @@ class MainWindow(QMainWindow):
             self.timer.stop()
 
     def update_device_status(self):
-        rows = []
-        for name in ["LS331", "K2400"]:
-            status = "Connected" if self.manager.get_device(name) else "Disconnected"
-            rows.append((name, status))
-        self.device_status_table.setRowCount(len(rows))
-        for i, (name, status) in enumerate(rows):
-            self.device_status_table.setItem(i, 0, QTableWidgetItem(name))
-            self.device_status_table.setItem(i, 1, QTableWidgetItem(status))
+        # 1. LS331 연결 상태 확인 및 스위치 동기화
+        is_ls_connected = self.manager.get_device("LS331") is not None
+        self.ls_switch.blockSignals(True)
+        self.ls_switch.setChecked(is_ls_connected)
+        self.ls_switch.update_style()
+        self.ls_switch.blockSignals(False)
+
+        # 2. K2400 연결 상태 확인 및 스위치 동기화
+        is_k_connected = self.manager.get_device("K2400") is not None
+        self.k_switch.blockSignals(True)
+        self.k_switch.setChecked(is_k_connected)
+        self.k_switch.update_style()
+        self.k_switch.blockSignals(False)
+
+        # 3. ZUP 연결 상태 확인 및 스위치 동기화
+        is_zup_connected = self.manager.get_device("ZUP") is not None
+        self.zup_switch.blockSignals(True)
+        self.zup_switch.setChecked(is_zup_connected)
+        self.zup_switch.update_style()
+        self.zup_switch.blockSignals(False)
+
+        # --- [핵심 추가] 연결된 장비의 데이터 열만 표시하기 ---
+        # 열 인덱스: 0:datetime, 1:elapsed, 2:LS_A, 3:LS_B, 4:LS_Set, 5:K_Volt, 6:K_Curr
+        
+        # LS331 열 (2, 3, 4번 열) 제어
+        for i in [2, 3, 4]:
+            self.data_table.setColumnHidden(i, not is_ls_connected)
+            
+        # K2400 열 (5, 6번 열) 제어
+        for i in [5, 6]:
+            self.data_table.setColumnHidden(i, not is_k_connected)
+
+        # ZUP 열 (7, 8 번 열) 제어
+        for i in [7, 8]:
+            self.data_table.setColumnHidden(i, not is_zup_connected)
 
     def update_measurement(self):
         data = self.manager.read_all()
         now = datetime.now().isoformat(timespec="seconds")
         elapsed = time.time() - self.t0
+
         ls = data.get("LS331", {})
         k = data.get("K2400", {})
+        zup = data.get("ZUP", {})
+
+        # ZUP 알람 체크 및 로그 출력 (AL00000이 정상이므로, 그 외엔 에러 로그)
+        alm = zup.get("alarm", "AL00000")
+        if alm and alm != "AL00000":
+            # 빨간색 폰트로 로그 출력 (에러 발생 시)
+            self.log_box.append(f"<span style='color:#FF3B30;'>[{datetime.now().strftime('%H:%M:%S')}] ZUP ALARM DETECTED: {alm}</span>")
+
         row = {
             "datetime": now,
             "elapsed_s": elapsed,
@@ -442,6 +594,8 @@ class MainWindow(QMainWindow):
             "LS331_setpoint_K": ls.get("setpoint_K", ""),
             "K2400_voltage_V": k.get("voltage_V", ""),
             "K2400_current_A": k.get("current_A", ""),
+            "ZUP_voltage_V": zup.get("voltage_V", ""),
+            "ZUP_current_A": zup.get("current_A", "")
         }
         self.data_rows.append(row)
         self.append_table_row(row)
@@ -451,8 +605,10 @@ class MainWindow(QMainWindow):
         r = self.data_table.rowCount()
         self.data_table.insertRow(r)
         columns = [
-            "datetime", "elapsed_s", "LS331_A_K", "LS331_B_K",
-            "LS331_setpoint_K", "K2400_voltage_V", "K2400_current_A",
+            "datetime", "elapsed_s",
+            "LS331_A_K", "LS331_B_K","LS331_setpoint_K",
+            "K2400_voltage_V", "K2400_current_A",
+            "ZUP_voltage_V", "ZUP_current_A"
         ]
         for c, key in enumerate(columns):
             value = row[key]
