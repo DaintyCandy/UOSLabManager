@@ -101,3 +101,51 @@ class LakeShore331:
     def input_status(self, channel: str = "A") -> int:
         channel = channel.upper()
         return int(self.query(f"RDGST? {channel}"))
+    
+    # ==========================================
+    # --- [추가] Input / Sensor Configuration ---
+    # ==========================================
+
+    def set_input_type(self, channel: str, sensor_type: int, compensation: bool):
+        """
+        매뉴얼 6-33 (INTYPE 명령어)
+        센서 종류와 보정(Room comp 또는 Thermal EMF) 여부를 설정합니다.
+        """
+        channel = channel.upper()
+        comp_val = 1 if compensation else 0
+        self.write(f"INTYPE {channel},{sensor_type},{comp_val}")
+
+    def get_input_type(self, channel: str):
+        """현재 센서 타입과 보정 여부를 읽어옵니다."""
+        channel = channel.upper()
+        response = self.query(f"INTYPE? {channel}").split(",")
+        # 반환값: (sensor_type, compensation_bool)
+        return int(response[0]), bool(int(response[1]))
+
+    def set_input_curve(self, channel: str, curve: int):
+        """
+        매뉴얼 6-32 (INCRV 명령어)
+        온도 변환 곡선(Curve)을 설정합니다.
+        """
+        channel = channel.upper()
+        # 커브 번호는 보통 2자리 숫자로 보냅니다 (예: 01, 06)
+        self.write(f"INCRV {channel},{curve:02d}")
+
+    def get_input_curve(self, channel: str) -> int:
+        """현재 설정된 커브 번호를 읽어옵니다."""
+        channel = channel.upper()
+        return int(self.query(f"INCRV? {channel}"))
+
+    def set_thermocouple(self, channel: str, voltage_range_mv: int, curve: int, room_compensation: bool):
+        """
+        열전대(Thermocouple) 전용 원클릭 셋업 함수
+        """
+        channel = channel.upper()
+        # 25mV 범위면 타입 6, 50mV 범위면 타입 7
+        sensor_type = 6 if voltage_range_mv == 25 else 7
+        comp_val = 1 if room_compensation else 0
+        
+        # 센서 타입 설정 후 커브 설정
+        self.write(f"INTYPE {channel},{sensor_type},{comp_val}")
+        time.sleep(0.1) # 설정이 먹힐 시간 부여
+        self.write(f"INCRV {channel},{curve:02d}")
