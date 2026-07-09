@@ -25,6 +25,7 @@ from keithley2400 import Keithley2400
 from zup36_12 import ZUP36_12
 
 from gui_panels.panel_sequence import SequencePanel
+from lakeshore331_window import LakeShore331Window 
 
 # ==========================================
 # LabVIEW 스타일 CSS (QSS) - 교수님 취향 반영
@@ -255,9 +256,17 @@ class MainWindow(QMainWindow):
         self.ls_port_input.setMinimumWidth(220)
         self.ls_switch = ToggleSwitch()
         
+        # [추가] LS331 상세 설정(팝업) 버튼
+        self.ls_settings_btn = QPushButton("⚙️") # 톱니바퀴 아이콘
+        self.ls_settings_btn.setFixedSize(28, 28)
+        self.ls_settings_btn.setStyleSheet("font-size: 14pt; border: none; background: transparent;")
+        self.ls_settings_btn.setToolTip("LS331 Advanced Settings")
+        self.ls_settings_btn.clicked.connect(self.open_ls331_window)
+        # ------------------------------------
         glayout.addWidget(QLabel("LS331 Port:"), 0, 0)
         glayout.addWidget(self.ls_port_input, 0, 1)
         glayout.addWidget(self.ls_switch, 0, 2)
+        glayout.addWidget(self.ls_settings_btn, 0, 3) # 스위치 옆에 톱니바퀴 배치
 
         # 2. K2400 Port (Addr에서 Port로 명칭 변경)
         self.k2400_addr_input = QLineEdit("GPIB0::24::INSTR") # 윈도우/맥 환경에 맞게 기본값 수정 필요
@@ -570,6 +579,9 @@ class MainWindow(QMainWindow):
         # ZUP 열 (7, 8 번 열) 제어
         for i in [7, 8]:
             self.data_table.setColumnHidden(i, not is_zup_connected)
+            
+        if hasattr(self, 'ls_window') and self.ls_window is not None:
+            self.ls_window.sync_connection_status()
 
     def update_measurement(self):
         data = self.manager.read_all()
@@ -764,6 +776,19 @@ class MainWindow(QMainWindow):
         self.stop_rheed_preview()
         self.disconnect_all()
         event.accept()
+        
+    def open_ls331_window(self):
+        # 창이 한 번도 열린 적 없으면 새로 생성
+        if not hasattr(self, 'ls_window') or self.ls_window is None:
+            self.ls_window = LakeShore331Window(self.manager, self)
+        
+        # [핵심 추가] 창을 띄우기 직전에 연결 상태를 강제로 동기화!
+        self.ls_window.sync_connection_status()
+        
+        # 창을 화면에 보이고 맨 앞으로 가져옴
+        self.ls_window.show()
+        self.ls_window.raise_()
+        self.ls_window.activateWindow()
 
 if __name__ == "__main__":
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
