@@ -54,7 +54,7 @@ class LakeShore331Window(QWidget):
 
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("LS331 Port"))
-        self.port_input = QLineEdit("COM3")
+        self.port_input = QLineEdit("/dev/cu.usbserial-A9EQ7W68")
         top_bar.addWidget(self.port_input)
         self.connect_btn = QPushButton("Connect")
         self.disconnect_btn = QPushButton("Disconnect")
@@ -249,6 +249,8 @@ class LakeShore331Window(QWidget):
 
     def connect_ls331(self):
         if self.get_device() is not None:
+            self.status_label.setText("Connected")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
             self.log("LS331 already connected")
             return
 
@@ -269,13 +271,15 @@ class LakeShore331Window(QWidget):
             self.show_error(str(exc))
 
     def disconnect_ls331(self):
+        # [수정] 상태가 어떻든 간에 버튼을 누르면 라벨은 무조건 빨간색으로 변경
+        self.status_label.setText("Disconnected")
+        self.status_label.setStyleSheet("color: red; font-weight: bold;")
+
         if self.get_device() is None:
             self.log("LS331 is already disconnected")
             return
-
+        
         self.manager.remove_device("LS331")
-        self.status_label.setText("Disconnected")
-        self.status_label.setStyleSheet("color: red; font-weight: bold;")
         self.log("Disconnected LS331")
         self.refresh_status()
         if hasattr(self.main_window, "update_device_status"):
@@ -339,6 +343,8 @@ class LakeShore331Window(QWidget):
             dev.set_input_type(channel, sensor_type, compensation)
             dev.set_input_curve(channel, curve)
             self.log(f"Applied input config on {channel}: type={sensor_type}, curve={curve}, comp={'ON' if compensation else 'OFF'}")
+            import time
+            time.sleep(1.0)
             self.refresh_status()
         except Exception as exc:
             self.show_error(str(exc))
@@ -375,6 +381,8 @@ class LakeShore331Window(QWidget):
             # Keep existing curve selection in the UI for thermocouple options.
             dev.set_thermocouple(channel=channel, voltage_range_mv=25, curve=curve, room_compensation=compensation)
             self.log(f"Configured thermocouple on {channel}: curve={curve}, compensation={'ON' if compensation else 'OFF'}")
+            import time
+            time.sleep(1.0)
             self.refresh_status()
         except Exception as exc:
             self.show_error(str(exc))
@@ -567,3 +575,15 @@ class LakeShore331Window(QWidget):
 
     def log(self, message: str):
         self.log_box.append(message)
+        
+    def sync_connection_status(self):
+        if self.get_device() is not None:
+            # 매니저에 장비가 존재하면 강제로 초록색 'Connected'로 변경
+            self.status_label.setText("Connected")
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            self.refresh_status() # 화면의 온도/설정값도 최신으로 불러옴
+        else:
+            # 없으면 빨간색 'Disconnected'로 변경
+            self.status_label.setText("Disconnected")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            self.refresh_status() # 값들을 '-' 로 초기화
