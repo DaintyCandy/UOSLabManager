@@ -1,8 +1,11 @@
+import json
 import time
+from pathlib import Path
+from core.sequence_engine import SequenceEngine
 from PyQt6.QtWidgets import (QWidget, QGroupBox, QVBoxLayout, QHBoxLayout, 
                              QLabel, QPushButton, QComboBox, QDoubleSpinBox, 
                              QListWidget, QListWidgetItem, QStackedWidget, 
-                             QMessageBox, QAbstractItemView)
+                             QMessageBox, QAbstractItemView, QFileDialog)
 from PyQt6.QtCore import Qt, QTimer
 
 class SequencePanel(QWidget):
@@ -10,6 +13,7 @@ class SequencePanel(QWidget):
         super().__init__()
         self.manager = device_manager
         self.log = log_callback
+        self.engine = SequenceEngine()
         
         self.sequence_steps = []
         self.current_step_idx = 0
@@ -19,6 +23,8 @@ class SequencePanel(QWidget):
         self.target_temp = 0.0
         self.wait_until = 0.0
         self.ramp_active_flag = False # Ramp가 켜져 있는지 추적
+        self.recipe_path = None
+        self.recipe_dirty = False
 
         self.engine_timer = QTimer()
         self.engine_timer.setInterval(1000)
@@ -35,6 +41,22 @@ class SequencePanel(QWidget):
         layout.setSpacing(10)
 
         # 1. 상단 입력부
+        recipe_bar = QHBoxLayout()
+        recipe_bar.addWidget(QLabel("Recipe:"))
+        self.recipe_label = QLabel("Untitled")
+        self.recipe_label.setStyleSheet("font-weight:bold;")
+        recipe_bar.addWidget(self.recipe_label)
+        recipe_bar.addStretch()
+        for text, callback in (
+            ("New Recipe", self.new_recipe),
+            ("Load Recipe", self.load_recipe),
+            ("Save Recipe", self.save_recipe),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(callback)
+            recipe_bar.addWidget(button)
+        layout.addLayout(recipe_bar)
+
         input_box = QHBoxLayout()
         input_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
         
@@ -76,7 +98,7 @@ class SequencePanel(QWidget):
 
         # 2. 시퀀스 리스트 (드래그 앤 드롭 순서 변경)
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("background-color: #F0F0F0; font-weight: bold; font-size: 10pt;")
+        self.list_widget.setStyleSheet("font-weight: bold; font-size: 10pt;")
         self.list_widget.setDragEnabled(True)
         self.list_widget.setAcceptDrops(True)
         self.list_widget.setDropIndicatorShown(True)
@@ -165,6 +187,7 @@ class SequencePanel(QWidget):
         item = QListWidgetItem(step_text)
         item.setData(Qt.ItemDataRole.UserRole, step_data)
         self.list_widget.addItem(item)
+        self.mark_recipe_dirty()
 
     def sync_sequence_after_drag(self):
         for i in range(self.list_widget.count()):
@@ -173,6 +196,7 @@ class SequencePanel(QWidget):
             if ". " in old_text:
                 desc = old_text.split(". ", 1)[1]
                 item.setText(f"{i+1}. {desc}")
+        self.mark_recipe_dirty()
 
     def delete_step(self):
         row = self.list_widget.currentRow()
@@ -181,7 +205,123 @@ class SequencePanel(QWidget):
             self.sync_sequence_after_drag()
 
     def clear_all(self):
-        if not self.is_running: self.list_widget.clear()
+        if not self.is_running:
+            self.list_widget.clear()
+            self.mark_recipe_dirty()
+
+    def mark_recipe_dirty(self):
+        self.recipe_dirty = True
+        name = self.recipe_path.stem if self.recipe_path else "Untitled"
+        self.recipe_label.setText(f"{name} *")
+
+    def new_recipe(self):
+        if self.is_running:
+            QMessageBox.warning(self, "Recipe", "Stop the sequence before creating a new recipe.")
+            return
+        if self.recipe_dirty and self.list_widget.count():
+            answer = QMessageBox.question(
+                self, "New Recipe", "Discard unsaved recipe changes?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.list_widget.clear()
+        self.recipe_path = None
+        self.recipe_dirty = False
+        self.recipe_label.setText("Untitled")
+        self.log("New recipe created")
+
+    def recipe_steps(self):
+        return [dict(self.list_widget.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(self.list_widget.count())]
+
+    def save_recipe(self):
+        if self.is_running:
+            QMessageBox.warning(self, "Recipe", "Stop the sequence before saving the recipe.")
+            return
+        if not self.list_widget.count():
+            QMessageBox.information(self, "Recipe", "There are no sequence steps to save.")
+            return
+        if self.recipe_path is None:
+            recipe_dir = Path.cwd() / "data" / "recipes"
+            recipe_dir.mkdir(parents=True, exist_ok=True)
+            path, _ = QFileDialog.getSaveFileName(self, "Save Recipe", str(recipe_dir / "new_recipe.json"), "Recipe Files (*.json)")
+            if not path:
+                return
+            self.recipe_path = Path(path)
+        payload = {"schema_version": 1, "name": self.recipe_path.stem, "steps": self.recipe_steps()}
+        self.recipe_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.recipe_dirty = False
+        self.recipe_label.setText(self.recipe_path.stem)
+        self.log(f"Recipe saved: {self.recipe_path}")
+
+    def load_recipe(self):
+        if self.is_running:
+            QMessageBox.warning(self, "Recipe", "Stop the sequence before loading a recipe.")
+            return
+        if self.recipe_dirty and self.list_widget.count():
+            answer = QMessageBox.question(
+                self, "Load Recipe", "Discard unsaved recipe changes?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        recipe_dir = Path.cwd() / "data" / "recipes"
+        recipe_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, "Load Recipe", str(recipe_dir), "Recipe Files (*.json)")
+        if not path:
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            steps = self.validate_recipe(payload)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            QMessageBox.critical(self, "Invalid Recipe", str(error))
+            return
+        self.list_widget.clear()
+        for step in steps:
+            self.add_recipe_item(step)
+        self.recipe_path = Path(path)
+        self.recipe_dirty = False
+        self.recipe_label.setText(payload.get("name") or self.recipe_path.stem)
+        self.log(f"Recipe loaded: {self.recipe_path}")
+
+    def validate_recipe(self, payload):
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise ValueError("Unsupported or missing recipe schema_version.")
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            raise ValueError("Recipe steps must be a list.")
+        allowed = {
+            "LS331": {"Set Temp", "Heater", "Apply Ramp", "Ramp Off", "Wait Time"},
+            "K2400": {"Set Voltage", "Output On", "Output Off"},
+            "ZUP36-12": {"Set Volt", "Set Amp", "Set OVP", "Set UVP", "Output On", "Output Off"},
+        }
+        validated = []
+        for index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                raise ValueError(f"Step {index} must be an object.")
+            device, command, value = step.get("dev"), step.get("cmd"), step.get("val")
+            if device not in allowed or command not in allowed[device]:
+                raise ValueError(f"Step {index} contains an unsupported device or command.")
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"Step {index} value must be numeric.")
+            if command == "Heater" and (int(value) != value or not 0 <= int(value) <= 3):
+                raise ValueError(f"Step {index} has an invalid heater range.")
+            validated.append({"dev": device, "cmd": command, "val": value})
+        return validated
+
+    def add_recipe_item(self, step):
+        index = self.list_widget.count() + 1
+        device, command, value = step["dev"], step["cmd"], step["val"]
+        if command in {"Output On", "Output Off", "Ramp Off"}:
+            display = ""
+        elif command == "Heater":
+            display = f" -> {(('Off', 'Low', 'Medium', 'High'))[int(value)]}"
+        else:
+            units = {"Set Temp": "K", "Apply Ramp": "K/min", "Wait Time": "min", "Set Voltage": "V", "Set Volt": "V", "Set Amp": "A", "Set OVP": "V", "Set UVP": "V"}
+            display = f" -> {value:g} {units.get(command, '')}".rstrip()
+        item = QListWidgetItem(f"{index}. [{device}] {command}{display}")
+        item.setData(Qt.ItemDataRole.UserRole, dict(step))
+        self.list_widget.addItem(item)
 
     def toggle_execution(self):
         if self.list_widget.count() == 0: return
