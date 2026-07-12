@@ -39,20 +39,23 @@ class MainWindow(QMainWindow):
         experiment_left = QSplitter(Qt.Orientation.Vertical)
         experiment_left.addWidget(self.sequence_panel)
         experiment_left.addWidget(self.measurement.log_widget)
-        experiment_left.setStretchFactor(0, 4)
-        experiment_left.setStretchFactor(1, 1)
+        experiment_left.setStretchFactor(0, 3)
+        experiment_left.setStretchFactor(1, 2)
+        experiment_left.setSizes([400, 240])
 
         experiment_right = QSplitter(Qt.Orientation.Vertical)
         experiment_right.addWidget(self.measurement.graph_widget)
         experiment_right.addWidget(self.measurement.table_widget)
         experiment_right.setStretchFactor(0, 3)
-        experiment_right.setStretchFactor(1, 2)
+        experiment_right.setStretchFactor(1, 3)
+        experiment_right.setSizes([340, 300])
 
         self.experiment_workspace = QSplitter(Qt.Orientation.Horizontal)
         self.experiment_workspace.addWidget(experiment_left)
         self.experiment_workspace.addWidget(experiment_right)
-        self.experiment_workspace.setStretchFactor(0, 2)
-        self.experiment_workspace.setStretchFactor(1, 5)
+        self.experiment_workspace.setStretchFactor(0, 1)
+        self.experiment_workspace.setStretchFactor(1, 6)
+        self.experiment_workspace.setSizes([330, 740])
         self.dashboard = DashboardPanel(
             self.manager, self.plugins, self.measurement, self.open_device_tab,
             self.emergency_stop,

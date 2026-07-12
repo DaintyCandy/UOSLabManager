@@ -48,9 +48,9 @@ class SequencePanel(QWidget):
         recipe_bar.addWidget(self.recipe_label)
         recipe_bar.addStretch()
         for text, callback in (
-            ("New Recipe", self.new_recipe),
-            ("Load Recipe", self.load_recipe),
-            ("Save Recipe", self.save_recipe),
+            ("New", self.new_recipe),
+            ("Load", self.load_recipe),
+            ("Save", self.save_recipe),
         ):
             button = QPushButton(text)
             button.clicked.connect(callback)
@@ -62,15 +62,15 @@ class SequencePanel(QWidget):
         
         self.dev_combo = QComboBox()
         self.dev_combo.addItems(["LS331", "K2400", "ZUP36-12"])
-        self.dev_combo.setFixedWidth(80)
+        self.dev_combo.setFixedWidth(70)
         self.dev_combo.currentTextChanged.connect(self.on_dev_changed)
         
         self.cmd_combo = QComboBox()
-        self.cmd_combo.setFixedWidth(110)
+        self.cmd_combo.setFixedWidth(90)
         self.cmd_combo.currentTextChanged.connect(self.on_cmd_changed)
         
         self.val_stack = QStackedWidget()
-        self.val_stack.setFixedSize(90, 25)
+        self.val_stack.setFixedSize(75, 25)
         
         self.val_spin = QDoubleSpinBox()
         self.val_spin.setRange(-200, 1000)
@@ -83,10 +83,10 @@ class SequencePanel(QWidget):
         self.val_stack.addWidget(self.heater_combo)
         
         self.unit_label = QLabel("K")
-        self.unit_label.setFixedWidth(30)
+        self.unit_label.setFixedWidth(25)
         
         self.add_btn = QPushButton("Add")
-        self.add_btn.setFixedSize(50, 28)
+        self.add_btn.setFixedSize(45, 28)
         self.add_btn.clicked.connect(self.add_to_stack)
 
         input_box.addWidget(self.dev_combo)
