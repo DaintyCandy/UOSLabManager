@@ -1,9 +1,9 @@
 import os
 from datetime import datetime
 
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QScrollArea, QSplitter, QTabWidget, QToolBar
+from PyQt6.QtWidgets import QMainWindow, QScrollArea, QSplitter, QTabBar, QTabWidget, QToolBar
 
 from core import DeviceManager, load_device_plugins
 from .panel_dashboard import DashboardPanel
@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dashboard, "Main")
         self.tabs.addTab(self.experiment_workspace, "Experiment")
         self.tabs.addTab(self.camera_panel, "Camera")
+        for index, color in enumerate(("#4da3ff", "#ffb74d", "#66bb6a")):
+            self.tabs.tabBar().setTabTextColor(index, QColor(color))
+            self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
+            self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
         self.setCentralWidget(self.tabs)
         self._create_toolbar()
         self.apply_theme_to_panels(self.theme_manager.current_theme)
