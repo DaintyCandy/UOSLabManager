@@ -1,78 +1,73 @@
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QCheckBox, QGroupBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout
+from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel
 
 
 class GraphSelectionTree(QGroupBox):
+    """Compact device/value graph selector with independent multi-selection state."""
+
     selection_changed = pyqtSignal()
 
     def __init__(self, plugins, parent=None):
         super().__init__("Graph Selection", parent)
-        self.child_items = {}
-        layout = QVBoxLayout(self)
-        self.select_all = QCheckBox("Select All")
-        self.select_all.setChecked(False)
-        self.select_all.toggled.connect(self.set_all_checked)
-        layout.addWidget(self.select_all)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.itemChanged.connect(self.item_changed)
-        layout.addWidget(self.tree)
-
-        self.tree.blockSignals(True)
+        self.plugins = plugins
+        self.states = {
+            column.label: False
+            for plugin in plugins.values()
+            for column in plugin.columns
+        }
+        layout = QHBoxLayout(self)
+        layout.addWidget(QLabel("Device"))
+        self.device_combo = QComboBox()
         for device_id, plugin in plugins.items():
-            parent_item = QTreeWidgetItem([plugin.display_name])
-            parent_item.setData(0, Qt.ItemDataRole.UserRole, device_id)
-            parent_item.setFlags(parent_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            parent_item.setCheckState(0, Qt.CheckState.Unchecked)
-            self.tree.addTopLevelItem(parent_item)
-            for column in plugin.columns:
-                child = QTreeWidgetItem([column.label])
-                child.setData(0, Qt.ItemDataRole.UserRole, column.label)
-                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                child.setCheckState(0, Qt.CheckState.Unchecked)
-                parent_item.addChild(child)
-                self.child_items[column.label] = child
-            parent_item.setExpanded(True)
-        self.tree.blockSignals(False)
+            self.device_combo.addItem(plugin.display_name, device_id)
+        layout.addWidget(self.device_combo)
+        layout.addWidget(QLabel("Value"))
+        self.value_combo = QComboBox()
+        layout.addWidget(self.value_combo, 1)
+        self.show_value = QCheckBox("Show")
+        layout.addWidget(self.show_value)
+        self.select_all = QCheckBox("Select All")
+        layout.addWidget(self.select_all)
+        self.device_combo.currentIndexChanged.connect(self.populate_values)
+        self.value_combo.currentIndexChanged.connect(self.sync_current_state)
+        self.show_value.toggled.connect(self.set_current_state)
+        self.select_all.toggled.connect(self.set_all_checked)
+        self.populate_values()
 
     def selected_labels(self):
-        return {
-            label for label, item in self.child_items.items()
-            if item.checkState(0) == Qt.CheckState.Checked
-        }
+        return {label for label, checked in self.states.items() if checked}
+
+    def populate_values(self, _index=None):
+        device_id = self.device_combo.currentData()
+        self.value_combo.blockSignals(True)
+        self.value_combo.clear()
+        if device_id in self.plugins:
+            for column in self.plugins[device_id].columns:
+                self.value_combo.addItem(column.label, column.label)
+        self.value_combo.blockSignals(False)
+        self.sync_current_state()
+
+    def sync_current_state(self, _index=None):
+        label = self.value_combo.currentData()
+        self.show_value.blockSignals(True)
+        self.show_value.setChecked(bool(label and self.states[label]))
+        self.show_value.blockSignals(False)
+
+    def set_current_state(self, checked):
+        label = self.value_combo.currentData()
+        if not label:
+            return
+        self.states[label] = checked
+        self._sync_select_all()
+        self.selection_changed.emit()
 
     def set_all_checked(self, checked):
-        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        self.tree.blockSignals(True)
-        for index in range(self.tree.topLevelItemCount()):
-            parent = self.tree.topLevelItem(index)
-            parent.setCheckState(0, state)
-            for child_index in range(parent.childCount()):
-                parent.child(child_index).setCheckState(0, state)
-        self.tree.blockSignals(False)
+        for label in self.states:
+            self.states[label] = checked
+        self.sync_current_state()
         self.selection_changed.emit()
 
-    def item_changed(self, item, _column):
-        self.tree.blockSignals(True)
-        if item.parent() is None:
-            state = item.checkState(0)
-            if state != Qt.CheckState.PartiallyChecked:
-                for index in range(item.childCount()):
-                    item.child(index).setCheckState(0, state)
-        else:
-            parent = item.parent()
-            states = [parent.child(index).checkState(0) for index in range(parent.childCount())]
-            if all(state == Qt.CheckState.Checked for state in states):
-                parent.setCheckState(0, Qt.CheckState.Checked)
-            elif all(state == Qt.CheckState.Unchecked for state in states):
-                parent.setCheckState(0, Qt.CheckState.Unchecked)
-            else:
-                parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
-        all_checked = bool(self.child_items) and all(
-            child.checkState(0) == Qt.CheckState.Checked for child in self.child_items.values()
-        )
+    def _sync_select_all(self):
         self.select_all.blockSignals(True)
-        self.select_all.setChecked(all_checked)
+        self.select_all.setChecked(bool(self.states) and all(self.states.values()))
         self.select_all.blockSignals(False)
-        self.tree.blockSignals(False)
-        self.selection_changed.emit()

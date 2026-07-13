@@ -13,15 +13,20 @@ class LakeShore331:
             stopbits=serial.STOPBITS_ONE,
             timeout=1,
         )
+        self.enabled_inputs = {"A": True, "B": True}
+        self.filter_windows = {"A": 10, "B": 10}
         time.sleep(0.2)
 
     def read_all(self):#한 번에 읽어오기
         return {
-            "A_temp_K": self.read_temp("A"),
-            "B_temp_K": self.read_temp("B"),
+            "A_temp_K": self.read_temp("A") if self.enabled_inputs["A"] else "",
+            "B_temp_K": self.read_temp("B") if self.enabled_inputs["B"] else "",
             "setpoint_K": self.get_setpoint(loop=1),
             "heater_range": self.get_heater_range(),
         }
+
+    def set_input_enabled(self, channel: str, enabled: bool):
+        self.enabled_inputs[channel.upper()] = bool(enabled)
     
     def close(self):
         if self.ser and self.ser.is_open:
@@ -35,6 +40,10 @@ class LakeShore331:
 
     def write(self, cmd: str):
         self.ser.write((cmd + "\r\n").encode("ascii"))
+        self.ser.flush()
+        # The 331 can silently miss commands sent back-to-back while it is
+        # committing an input or curve change.
+        time.sleep(0.05)
 
     def query(self, cmd: str) -> str:
         self.write(cmd)
@@ -55,6 +64,26 @@ class LakeShore331:
 
     def set_setpoint(self, value: float, loop: int = 1):
         self.write(f"SETP {loop},{value}")
+
+    def get_control_mode(self, loop: int = 1) -> int:
+        return int(self.query(f"CMODE? {loop}"))
+
+    def set_control_mode(self, mode: int, loop: int = 1):
+        if mode not in (1, 2, 3, 4, 5, 6):
+            raise ValueError("control mode must be between 1 and 6")
+        self.write(f"CMODE {loop},{mode}")
+
+    def get_control_setup(self, loop: int = 1):
+        input_channel, units, powerup, output_display = self.query(f"CSET? {loop}").split(",")
+        return input_channel.strip().upper(), int(units), bool(int(powerup)), int(output_display)
+
+    def set_control_setup(self, input_channel: str, units: int, powerup: bool, output_display: int, loop: int = 1):
+        input_channel = input_channel.upper()
+        if input_channel not in ("A", "B"):
+            raise ValueError("control input must be A or B")
+        if units not in (1, 2, 3) or output_display not in (1, 2):
+            raise ValueError("invalid control setup value")
+        self.write(f"CSET {loop},{input_channel},{units},{int(powerup)},{output_display}")
 
     def get_pid(self, loop: int = 1):
         p, i, d = self.query(f"PID? {loop}").split(",")
@@ -135,6 +164,46 @@ class LakeShore331:
         """현재 설정된 커브 번호를 읽어옵니다."""
         channel = channel.upper()
         return int(self.query(f"INCRV? {channel}"))
+
+    def get_filter(self, channel: str):
+        channel = channel.upper()
+        values = self.query(f"FILTER? {channel}").split(",")
+        if len(values) < 2:
+            raise ValueError(f"Unexpected FILTER response for input {channel}: {','.join(values)}")
+        enabled, points = values[:2]
+        if len(values) >= 3:
+            self.filter_windows[channel] = int(float(values[2]))
+        return bool(int(enabled)), int(points)
+
+    def set_filter(self, channel: str, enabled: bool, points: int):
+        channel = channel.upper()
+        if not 2 <= points <= 64:
+            raise ValueError("filter points must be between 2 and 64")
+        window = self.filter_windows.get(channel, 10)
+        self.write(f"FILTER {channel},{int(enabled)},{points},{window}")
+
+    def get_curve_header(self, curve: int):
+        name, serial_number, data_format, limit, coefficient = self.query(f"CRVHDR? {curve}").split(",")
+        return name.strip(), serial_number.strip(), int(data_format), float(limit), int(coefficient)
+
+    def set_curve_header(self, curve: int, name: str, serial_number: str, data_format: int, limit: float, coefficient: int):
+        if not 21 <= curve <= 41:
+            raise ValueError("only user curves 21 through 41 can be edited")
+        self.write(f"CRVHDR {curve},{name[:15]},{serial_number[:10]},{data_format},{limit},{coefficient}")
+
+    def get_curve_point(self, curve: int, index: int):
+        sensor_units, temperature = self.query(f"CRVPT? {curve},{index}").split(",")
+        return float(sensor_units), float(temperature)
+
+    def set_curve_point(self, curve: int, index: int, sensor_units: float, temperature: float):
+        if not 21 <= curve <= 41 or not 1 <= index <= 200:
+            raise ValueError("invalid user curve or point index")
+        self.write(f"CRVPT {curve},{index},{sensor_units},{temperature}")
+
+    def delete_curve(self, curve: int):
+        if not 21 <= curve <= 41:
+            raise ValueError("only user curves 21 through 41 can be deleted")
+        self.write(f"CRVDEL {curve}")
 
     def set_thermocouple(self, channel: str, voltage_range_mv: int, curve: int, room_compensation: bool):
         """

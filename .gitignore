@@ -26,3 +26,4 @@ data/
 *.txt
 rheed_recordings/
 camera_recordings/
+*mp4

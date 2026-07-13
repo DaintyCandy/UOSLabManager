@@ -69,6 +69,7 @@ class MeasurementPanels:
 
     def _build_table_widget(self):
         panel = QWidget()
+        panel.setMinimumHeight(220)
         layout = QVBoxLayout(panel)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Data Table"))
@@ -86,6 +87,7 @@ class MeasurementPanels:
 
     def _build_log_widget(self):
         group = QGroupBox("System Log")
+        group.setMinimumHeight(170)
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
