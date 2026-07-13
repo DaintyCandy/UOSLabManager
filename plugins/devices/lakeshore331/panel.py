@@ -57,6 +57,7 @@ class LakeShore331Window(QWidget):
         self.tracking_timer = QTimer(self)
         self.tracking_timer.setInterval(1000)
         self.tracking_timer.timeout.connect(self.refresh_input_tracking)
+        self.tracking_error_active = False
         self.input_controls = {}
         self.loop_controls = {}
         self._build_ui()
@@ -683,15 +684,25 @@ class LakeShore331Window(QWidget):
                         del values[:-600]
                 controls["temperature_curve"].setData(history["time"], history["temperature"])
                 controls["sensor_curve"].setData(history["time"], history["sensor"])
+            self.tracking_error_active = False
         except Exception as error:
-            self.tracking_timer.stop()
-            self.log(f"Tracking stopped: {error}")
+            # A device can briefly return an empty line while processing a
+            # settings command. Keep the timer alive and retry on the next tick.
+            if not self.tracking_error_active:
+                self.log(f"Tracking read skipped; retrying: {error}")
+                self.tracking_error_active = True
+
+    def resume_input_tracking(self):
+        if self.get_device() is not None and not self.tracking_timer.isActive():
+            self.tracking_timer.start()
 
     def apply_settings(self):
         device = self.get_device()
         if device is None:
             self.show_error("Connect the device first.")
             return
+        tracking_was_active = self.tracking_timer.isActive()
+        self.tracking_timer.stop()
         try:
             temperatures = [device.read_temp(channel) for channel in ("A", "B")]
             if max(temperatures) > self.max_temperature.value():
@@ -701,10 +712,23 @@ class LakeShore331Window(QWidget):
                 device.set_input_enabled(channel, controls["enabled"].isChecked())
                 if not controls["enabled"].isChecked():
                     continue
-                sensor_code = controls["range"].currentData()
+                sensor_code = controls["sensor"].currentData()
+                curve_number = controls["curve"].currentData()
                 device.set_input_type(channel, sensor_code, controls["compensation"])
-                device.set_input_curve(channel, controls["curve"].currentData())
+                device.set_input_curve(channel, curve_number)
                 device.set_filter(channel, controls["filter"].isChecked(), controls["filter_points"].value())
+                applied_sensor, applied_compensation = device.get_input_type(channel)
+                applied_curve = device.get_input_curve(channel)
+                if (applied_sensor, applied_compensation) != (sensor_code, controls["compensation"]):
+                    raise RuntimeError(
+                        f"Input {channel} sensor setting was not accepted "
+                        f"(requested {sensor_code}, read back {applied_sensor})."
+                    )
+                if applied_curve != curve_number:
+                    raise RuntimeError(
+                        f"Input {channel} curve setting was not accepted "
+                        f"(requested {curve_number}, read back {applied_curve})."
+                    )
             for loop, controls in self.loop_controls.items():
                 manual = min(controls["heater_manual"].value(), controls["output_limit"].value(), self.max_manual_output.value())
                 mode = controls["mode"].currentData()
@@ -726,13 +750,16 @@ class LakeShore331Window(QWidget):
             self.log("Settings applied")
         except Exception as error:
             self.show_error(error)
+        finally:
+            if tracking_was_active:
+                QTimer.singleShot(500, self.resume_input_tracking)
 
     def profile_data(self):
         return {
             "port": self.port_input.text(),
             "inputs": {channel: {
                 "enabled": c["enabled"].isChecked(), "name": c["name"].text(),
-                "sensor": c["sensor"].currentText(), "sensor_code": c["range"].currentData(),
+                "sensor": c["sensor"].currentText(), "sensor_code": c["sensor"].currentData(),
                 "excitation": c["excitation"].currentText(), "curve": c["curve"].currentData(),
                 "preferred_unit": c["preferred_unit"].currentText(),
                 "filter": c["filter"].isChecked(), "filter_points": c["filter_points"].value(),

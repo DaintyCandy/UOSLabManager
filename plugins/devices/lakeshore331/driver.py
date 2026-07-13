@@ -14,6 +14,7 @@ class LakeShore331:
             timeout=1,
         )
         self.enabled_inputs = {"A": True, "B": True}
+        self.filter_windows = {"A": 10, "B": 10}
         time.sleep(0.2)
 
     def read_all(self):#한 번에 읽어오기
@@ -39,6 +40,10 @@ class LakeShore331:
 
     def write(self, cmd: str):
         self.ser.write((cmd + "\r\n").encode("ascii"))
+        self.ser.flush()
+        # The 331 can silently miss commands sent back-to-back while it is
+        # committing an input or curve change.
+        time.sleep(0.05)
 
     def query(self, cmd: str) -> str:
         self.write(cmd)
@@ -161,13 +166,21 @@ class LakeShore331:
         return int(self.query(f"INCRV? {channel}"))
 
     def get_filter(self, channel: str):
-        enabled, points = self.query(f"FILTER? {channel.upper()}").split(",")
+        channel = channel.upper()
+        values = self.query(f"FILTER? {channel}").split(",")
+        if len(values) < 2:
+            raise ValueError(f"Unexpected FILTER response for input {channel}: {','.join(values)}")
+        enabled, points = values[:2]
+        if len(values) >= 3:
+            self.filter_windows[channel] = int(float(values[2]))
         return bool(int(enabled)), int(points)
 
     def set_filter(self, channel: str, enabled: bool, points: int):
+        channel = channel.upper()
         if not 2 <= points <= 64:
             raise ValueError("filter points must be between 2 and 64")
-        self.write(f"FILTER {channel.upper()},{int(enabled)},{points}")
+        window = self.filter_windows.get(channel, 10)
+        self.write(f"FILTER {channel},{int(enabled)},{points},{window}")
 
     def get_curve_header(self, curve: int):
         name, serial_number, data_format, limit, coefficient = self.query(f"CRVHDR? {curve}").split(",")
