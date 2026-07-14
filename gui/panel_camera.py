@@ -1,4 +1,5 @@
 import os
+import numpy as np  # <-- NumPy 추가
 from datetime import datetime
 
 from PyQt6.QtCore import Qt, QTimer
@@ -13,7 +14,6 @@ try:
 except ImportError:
     cv2 = None
 
-
 class CameraPanel(QWidget):
     def __init__(self, output_dir, log_callback):
         super().__init__()
@@ -23,6 +23,10 @@ class CameraPanel(QWidget):
         self.writer = None
         self.recording = False
         self.video_path = ""
+        
+        # --- [RHEED 1D 추출용 변수] ---
+        self.latest_profile = None 
+
         self.timer = QTimer()
         self.timer.setInterval(33)
         self.timer.timeout.connect(self.update_frame)
@@ -32,6 +36,8 @@ class CameraPanel(QWidget):
         layout = QVBoxLayout(self)
         group = QGroupBox("Camera / Recording")
         body = QVBoxLayout(group)
+        
+        # 1. 상단 소스 및 FPS
         options = QHBoxLayout()
         options.addWidget(QLabel("Source:"))
         self.source_input = QLineEdit("0")
@@ -43,11 +49,32 @@ class CameraPanel(QWidget):
         options.addWidget(self.fps_input)
         options.addStretch()
         body.addLayout(options)
+        
+        # --- [추가] 2. RHEED ROI(관심영역) 설정 UI ---
+        roi_layout = QHBoxLayout()
+        roi_layout.addWidget(QLabel("ROI Center Y(%):"))
+        self.roi_y_spin = QDoubleSpinBox()
+        self.roi_y_spin.setRange(0, 100)
+        self.roi_y_spin.setValue(50.0) # 기본 화면 정중앙
+        roi_layout.addWidget(self.roi_y_spin)
+        
+        roi_layout.addWidget(QLabel("ROI Height(%):"))
+        self.roi_h_spin = QDoubleSpinBox()
+        self.roi_h_spin.setRange(1, 100)
+        self.roi_h_spin.setValue(10.0) # 화면 높이의 10% 두께
+        roi_layout.addWidget(self.roi_h_spin)
+        roi_layout.addStretch()
+        body.addLayout(roi_layout)
+        # ----------------------------------------
+
+        # 3. 프리뷰 화면
         self.preview = QLabel("No camera preview")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(160)
         self.preview.setStyleSheet("background:#000; color:#777; border:2px inset #555;")
         body.addWidget(self.preview)
+        
+        # 4. 저장 및 제어 버튼
         folder = QHBoxLayout()
         folder.addWidget(QLabel("Path:"))
         self.path_display = QLineEdit(self.output_dir)
@@ -57,6 +84,7 @@ class CameraPanel(QWidget):
         choose.clicked.connect(self.choose_output_dir)
         folder.addWidget(choose)
         body.addLayout(folder)
+        
         controls = QHBoxLayout()
         start = QPushButton("Start Preview")
         stop = QPushButton("Stop Preview")
@@ -65,6 +93,7 @@ class CameraPanel(QWidget):
         controls.addWidget(start)
         controls.addWidget(stop)
         body.addLayout(controls)
+        
         self.record_button = QPushButton("Start Recording")
         self.record_button.clicked.connect(self.toggle_recording)
         body.addWidget(self.record_button)
@@ -103,6 +132,7 @@ class CameraPanel(QWidget):
         if self.capture is not None:
             self.capture.release()
             self.capture = None
+        self.latest_profile = None # 끄면 프로파일도 초기화
         self.preview.clear()
         self.preview.setText("No camera preview")
 
@@ -137,9 +167,33 @@ class CameraPanel(QWidget):
             return
         if self.recording:
             self.write_frame(frame)
+            
+        # --- [추가] RHEED 1D 프로파일 추출 (Vertical Projection) ---
+        height, width = frame.shape[:2]
+        center_pct = self.roi_y_spin.value() / 100.0
+        height_pct = self.roi_h_spin.value() / 100.0
+        
+        y_center = int(height * center_pct)
+        h_pixels = int(height * height_pct)
+        
+        y1 = max(0, y_center - h_pixels // 2)
+        y2 = min(height, y_center + h_pixels // 2)
+
+        # 흑백으로 변환 후 해당 영역(ROI)을 세로(axis=0)로 평균 냄
+        if y2 > y1:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            roi = gray[y1:y2, :]
+            self.latest_profile = np.mean(roi, axis=0) # 1D Array 생성!
+        else:
+            self.latest_profile = None
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        height, width, channels = rgb.shape
-        image = QImage(rgb.data, width, height, channels * width, QImage.Format.Format_RGB888).copy()
+        # 추출 영역을 녹색 박스로 렌더링 (사용자 시각적 확인용)
+        cv2.rectangle(rgb, (0, y1), (width - 1, y2), (0, 255, 0), 2)
+        # --------------------------------------------------------
+
+        bytes_per_line = 3 * width
+        image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(image).scaled(
             self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -150,9 +204,13 @@ class CameraPanel(QWidget):
         if self.writer is None:
             height, width = frame.shape[:2]
             codec = cv2.VideoWriter_fourcc(*"mp4v")
-            self.writer = cv2.VideoWriter(self.video_path, codec, self.fps_input.value(), (width, height))
+            self.writer = cv2.VideoWriter(self.video_path, codec, int(self.fps_input.value()), (width, height))
             if not self.writer.isOpened():
                 QMessageBox.critical(self, "Camera Error", "Cannot create camera video file.")
                 self.stop_recording()
                 return
         self.writer.write(frame)
+        
+    # 데이터 로거가 프로파일을 가져갈 수 있게 하는 함수
+    def get_latest_profile(self):
+        return self.latest_profile
