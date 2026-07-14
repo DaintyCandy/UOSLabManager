@@ -1,9 +1,9 @@
 import os
 from datetime import datetime
 
-from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QScrollArea, QSplitter, QTabBar, QTabWidget, QToolBar
+from PyQt6.QtWidgets import QMainWindow, QScrollArea, QSplitter, QTabWidget, QToolBar
 
 from core import DeviceManager, load_device_plugins
 from .panel_dashboard import DashboardPanel
@@ -35,27 +35,25 @@ class MainWindow(QMainWindow):
         self.sequence_panel = SequencePanel(self.manager, self.log)
         output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "camera_recordings")
         self.camera_panel = CameraPanel(output_dir, self.log)
+        self.measurement.get_rheed_profile = self.camera_panel.get_latest_profile
 
         experiment_left = QSplitter(Qt.Orientation.Vertical)
         experiment_left.addWidget(self.sequence_panel)
         experiment_left.addWidget(self.measurement.log_widget)
-        experiment_left.setStretchFactor(0, 3)
-        experiment_left.setStretchFactor(1, 2)
-        experiment_left.setSizes([400, 240])
+        experiment_left.setStretchFactor(0, 4)
+        experiment_left.setStretchFactor(1, 1)
 
         experiment_right = QSplitter(Qt.Orientation.Vertical)
         experiment_right.addWidget(self.measurement.graph_widget)
         experiment_right.addWidget(self.measurement.table_widget)
         experiment_right.setStretchFactor(0, 3)
-        experiment_right.setStretchFactor(1, 3)
-        experiment_right.setSizes([340, 300])
+        experiment_right.setStretchFactor(1, 2)
 
         self.experiment_workspace = QSplitter(Qt.Orientation.Horizontal)
         self.experiment_workspace.addWidget(experiment_left)
         self.experiment_workspace.addWidget(experiment_right)
-        self.experiment_workspace.setStretchFactor(0, 1)
-        self.experiment_workspace.setStretchFactor(1, 6)
-        self.experiment_workspace.setSizes([330, 740])
+        self.experiment_workspace.setStretchFactor(0, 2)
+        self.experiment_workspace.setStretchFactor(1, 5)
         self.dashboard = DashboardPanel(
             self.manager, self.plugins, self.measurement, self.open_device_tab,
             self.emergency_stop,
@@ -69,10 +67,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.dashboard, "Main")
         self.tabs.addTab(self.experiment_workspace, "Experiment")
         self.tabs.addTab(self.camera_panel, "Camera")
-        for index, color in enumerate(("#4da3ff", "#ffb74d", "#66bb6a")):
-            self.tabs.tabBar().setTabTextColor(index, QColor(color))
-            self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
-            self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
         self.setCentralWidget(self.tabs)
         self._create_toolbar()
         self.apply_theme_to_panels(self.theme_manager.current_theme)
