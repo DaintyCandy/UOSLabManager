@@ -64,6 +64,8 @@ class ZUP3612Panel(QWidget):
         layout.addWidget(self.status_label, 0, 3)
         layout.addWidget(connect, 0, 4)
         layout.addWidget(disconnect, 0, 5)
+        self.response_label = QLabel("Response: -")
+        layout.addWidget(self.response_label, 1, 0, 1, 2)
         self.monitor_labels = {}
         items = (
             ("voltage", "Actual Voltage"), ("current", "Actual Current"),
@@ -71,7 +73,7 @@ class ZUP3612Panel(QWidget):
             ("output", "Output Status"), ("faults", "OVP/OTP/Foldback Fault"),
             ("communication", "Communication Error"),
         )
-        for row, (key, title) in enumerate(items, start=1):
+        for row, (key, title) in enumerate(items, start=2):
             layout.addWidget(QLabel(title), row, 0, 1, 2)
             label = QLabel("-")
             layout.addWidget(label, row, 2, 1, 4)
@@ -147,7 +149,8 @@ class ZUP3612Panel(QWidget):
         if self.get_device() is not None:
             return
         try:
-            self.manager.add_device("ZUP", ZUP36_12(self.port_input.text().strip()))
+            port = self.port_input.text().strip()
+            self.manager.add_device("ZUP", lambda: ZUP36_12(port))
             self.log("Connected")
             self.monitor_timer.start()
             self._notify_main()
@@ -167,9 +170,14 @@ class ZUP3612Panel(QWidget):
     def refresh_monitoring(self):
         device = self.get_device()
         if device is None:
+            self.monitor_timer.stop()
+            self.sync_connection_status()
             return
         try:
-            state = device.read_monitoring()
+            state = self.manager.get_latest("ZUP")
+            if not state:
+                self.update_realtime_status()
+                return
             self.monitor_labels["voltage"].setText(f"{state['voltage_V']:.3f} V")
             self.monitor_labels["current"].setText(f"{state['current_A']:.3f} A")
             self.monitor_labels["power"].setText(f"{state['power_W']:.3f} W")
@@ -182,9 +190,15 @@ class ZUP3612Panel(QWidget):
             if self.block_output_on_fault.isChecked() and faults and state["output_on"]:
                 device.output_off()
                 self.log(f"Safety interlock: output disabled ({', '.join(faults)})")
+            self.update_realtime_status()
         except Exception as error:
             self.monitor_labels["communication"].setText(str(error))
-            self.log(f"Communication error: {error}")
+            self.monitor_timer.stop()
+            self.manager.remove_device("ZUP")
+            self.sync_connection_status()
+            self.log(f"Connection lost; changed to Disconnected: {error}")
+            if self.main_window:
+                self.main_window.update_device_status()
 
     def read_device(self):
         device = self.get_device()
@@ -283,6 +297,12 @@ class ZUP3612Panel(QWidget):
             self.monitor_timer.start()
         elif not connected:
             self.monitor_timer.stop()
+        self.update_realtime_status()
+
+    def update_realtime_status(self):
+        metrics = self.manager.get_metrics("ZUP")
+        response = metrics["response_ms"]
+        self.response_label.setText("Response: -" if response is None else f"Response: {response:.1f} ms")
 
     def _notify_main(self):
         self.sync_connection_status()

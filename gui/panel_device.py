@@ -40,7 +40,10 @@ class DeviceSettingsPanel(QWidget):
         connection = self.connection_input.text().strip()
         if self.manager.get_device(self.plugin.device_id) is None:
             try:
-                self.manager.add_device(self.plugin.device_id, self.plugin.connect(connection))
+                self.manager.add_device(
+                    self.plugin.device_id,
+                    lambda: self.plugin.connect(connection),
+                )
                 self.main_window.log(self.plugin.format_connected(connection))
                 self.log_box.append(self.plugin.format_connected(connection))
             except Exception as error:
