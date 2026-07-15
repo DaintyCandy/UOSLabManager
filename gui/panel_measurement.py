@@ -96,7 +96,7 @@ class MeasurementPanels:
         plot.setLabel("bottom", "Time", units="s")
         # qdarktheme uses a taller label font than pyqtgraph's automatic axis
         # geometry reserves, so leave space *outside* the axis title.
-        plot.getAxis("bottom").setHeight(60)
+        plot.getAxis("bottom").setHeight(30)
         legend = plot.addLegend(offset=(-10, 10))
         curves = {}
         for index, label in enumerate(self.columns[2:]):

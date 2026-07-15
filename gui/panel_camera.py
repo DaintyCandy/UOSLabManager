@@ -62,9 +62,6 @@ class CameraPanel(QWidget):
         # --- [RHEED 1D 추출용 변수] ---
         self.latest_profile = None 
 
-        self.timer = QTimer()
-        self.timer.setInterval(33)
-        self.timer.timeout.connect(self.update_frame)
         self._build_ui()
 
     def _build_ui(self):
@@ -178,32 +175,6 @@ class CameraPanel(QWidget):
     def update_recording_mode_controls(self, _checked=False):
         fixed_fps_enabled = not self.realtime_checkbox.isChecked() and not self.recording_armed
         self.fps_input.setEnabled(fixed_fps_enabled)
-        body.addWidget(self.preview)
-        
-        # 4. 저장 및 제어 버튼
-        folder = QHBoxLayout()
-        folder.addWidget(QLabel("Path:"))
-        self.path_display = QLineEdit(self.output_dir)
-        self.path_display.setReadOnly(True)
-        folder.addWidget(self.path_display)
-        choose = QPushButton("Choose")
-        choose.clicked.connect(self.choose_output_dir)
-        folder.addWidget(choose)
-        body.addLayout(folder)
-        
-        controls = QHBoxLayout()
-        start = QPushButton("Start Preview")
-        stop = QPushButton("Stop Preview")
-        start.clicked.connect(self.start_preview)
-        stop.clicked.connect(self.stop_preview)
-        controls.addWidget(start)
-        controls.addWidget(stop)
-        body.addLayout(controls)
-        
-        self.record_button = QPushButton("Start Recording")
-        self.record_button.clicked.connect(self.toggle_recording)
-        body.addWidget(self.record_button)
-        layout.addWidget(group)
 
     def source(self):
         value = self.source_input.text().strip()
@@ -235,10 +206,6 @@ class CameraPanel(QWidget):
         self.last_frame_at = None
         self.preview_fps = None
         self.frame_status_label.setText("Frame: -")
-        self.timer.stop()
-        if self.capture is not None:
-            self.capture.release()
-            self.capture = None
         self.latest_profile = None # 끄면 프로파일도 초기화
         self.preview.clear()
         self.preview.setText("No camera preview")
@@ -342,7 +309,6 @@ class CameraPanel(QWidget):
                 if self.last_recorded_at is None or now - self.last_recorded_at >= recording_interval:
                     self.write_frame(frame)
                     self.last_recorded_at = now
-            self.write_frame(frame)
             
         # --- [추가] RHEED 1D 프로파일 추출 (Vertical Projection) ---
         height, width = frame.shape[:2]
@@ -392,6 +358,9 @@ class CameraPanel(QWidget):
                 return
         self.writer.write(frame)
 
+    def get_latest_profile(self):
+        return self.latest_profile
+
 
 class CameraWorkspace(QWidget):
     """One or two independently controlled camera panels."""
@@ -413,10 +382,13 @@ class CameraWorkspace(QWidget):
         controls.addWidget(self.split_button)
         layout.addLayout(controls)
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(0)
+        self.splitter.setChildrenCollapsible(False)
         self.primary = CameraPanel(output_dir, self.camera_log, "0", "Camera 1")
         self.secondary = CameraPanel(output_dir, self.camera_log, "1", "Camera 2")
         self.splitter.addWidget(self.primary)
         self.splitter.addWidget(self.secondary)
+        self.splitter.handle(1).setEnabled(False)
         self.secondary.setVisible(False)
         layout.addWidget(self.splitter, 1)
         log_group = QGroupBox("Camera Log")
@@ -451,8 +423,7 @@ class CameraWorkspace(QWidget):
         self.split_button.setText("▣" if enabled else "◫")
         self.split_button.setToolTip("Merge camera view" if enabled else "Split camera view")
         if enabled:
-            width = max(900, self.splitter.width())
-            self.splitter.setSizes([width // 2, width // 2])
+            self.splitter.setSizes([1, 1])
 
     def stop_preview(self):
         self.primary.stop_preview()
@@ -460,4 +431,4 @@ class CameraWorkspace(QWidget):
         
     # 데이터 로거가 프로파일을 가져갈 수 있게 하는 함수
     def get_latest_profile(self):
-        return self.latest_profile
+        return self.primary.get_latest_profile()

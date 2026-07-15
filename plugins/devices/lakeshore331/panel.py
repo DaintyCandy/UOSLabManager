@@ -10,7 +10,8 @@ from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QProgressDialog, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QProgressDialog, QSizePolicy, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout,
+    QWidget,
 )
 
 from .driver import LakeShore331
@@ -94,7 +95,8 @@ class LakeShore331Window(QWidget):
         self.settings_tabs.addTab(self._build_loop_tab(2), "Loop 2")
         self.settings_tabs.addTab(self._build_safety_tab(), "Safety")
         self.settings_tabs.addTab(self._build_curve_editor_tab(), "Curve Editing")
-        root.addWidget(self.settings_tabs)
+        self.settings_tabs.setMaximumHeight(370)
+        root.addWidget(self.settings_tabs, 1)
 
         buttons = QHBoxLayout()
         for text, callback in (
@@ -110,8 +112,10 @@ class LakeShore331Window(QWidget):
 
     def _build_summary(self):
         group = QGroupBox("Lake Shore 331S")
+        group.setMaximumHeight(205)
         layout = QGridLayout(group)
         self.port_input = QLineEdit("COM3")
+        self.port_input.setMaximumWidth(90)
         self.baud_label = QLabel("9600")
         self.status_label = QLabel("● Disconnected")
         self.status_label.setStyleSheet("color:#e74c3c; font-weight:bold;")
@@ -143,10 +147,11 @@ class LakeShore331Window(QWidget):
 
     def _build_log(self):
         group = QGroupBox("Log")
+        group.setMaximumHeight(205)
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(180)
+        self.log_box.setMinimumHeight(110)
         self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
         layout.addWidget(self.log_box)
         return group
@@ -185,6 +190,9 @@ class LakeShore331Window(QWidget):
         processing_form.addRow("Filter Points", filter_points)
         tracking_group = QGroupBox("Readings and Tracking")
         tracking_layout = QVBoxLayout(tracking_group)
+        # Outer padding protects axis titles from the group-box frame. Axis
+        # dimensions remain automatic so label-to-tick spacing is unchanged.
+        tracking_layout.setContentsMargins(28, 20, 20, 30)
         readings = QGridLayout()
         readings.addWidget(QLabel("Temperature"), 0, 0)
         readings.addWidget(temperature, 0, 1)
@@ -194,12 +202,17 @@ class LakeShore331Window(QWidget):
         tracking_plot = pg.PlotWidget()
         tracking_plot.setLabel("bottom", "Time", units="s")
         tracking_plot.setLabel("left", "Value")
+        tracking_plot.getAxis("bottom").setHeight(52)
+        tracking_plot.getAxis("left").setWidth(72)
         tracking_plot.addLegend(offset=(-10, 10))
         temperature_curve = tracking_plot.plot([], [], name="Temperature [K]", pen=pg.mkPen("#ef5350", width=2))
         sensor_curve = tracking_plot.plot([], [], name="Sensor Value", pen=pg.mkPen("#42a5f5", width=2))
         tracking_layout.addWidget(tracking_plot)
-        layout.addWidget(sensor_group)
-        layout.addWidget(processing_group)
+        for group in (sensor_group, processing_group, tracking_group):
+            group.setMinimumWidth(0)
+            group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(sensor_group, 1)
+        layout.addWidget(processing_group, 1)
         layout.addWidget(tracking_group, 2)
         self.input_controls[channel] = {
             "name": input_name, "hardware": hardware,
@@ -333,9 +346,12 @@ class LakeShore331Window(QWidget):
         pid_form.addRow("Preset", controls["preset"])
         pid_form.addRow("Tune Activated", controls["tune_status"])
 
-        groups_layout.addWidget(control_group)
-        groups_layout.addWidget(heater_group)
-        groups_layout.addWidget(pid_group)
+        for group in (control_group, heater_group, pid_group):
+            group.setMinimumWidth(0)
+            group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        groups_layout.addWidget(control_group, 1)
+        groups_layout.addWidget(heater_group, 1)
+        groups_layout.addWidget(pid_group, 1)
         layout.addLayout(groups_layout)
         self.loop_controls[loop] = controls
         if controls["enabled"] is not None:
@@ -444,16 +460,22 @@ class LakeShore331Window(QWidget):
 
         graph_group = QGroupBox("Curve Preview")
         graph_layout = QVBoxLayout(graph_group)
+        graph_layout.setContentsMargins(20, 20, 32, 30)
         self.curve_plot = pg.PlotWidget()
         self.curve_plot.setLabel("bottom", "Sensor Value")
         self.curve_plot.showAxis("right")
         self.curve_plot.hideAxis("left")
         self.curve_plot.setLabel("right", "Temperature", units="K")
+        self.curve_plot.getAxis("bottom").setHeight(52)
+        self.curve_plot.getAxis("right").setWidth(78)
         self.curve_plot.showGrid(x=True, y=True, alpha=0.25)
         self.curve_preview = self.curve_plot.plot([], [], pen=pg.mkPen("#4da3ff", width=2), symbol="o", symbolSize=5)
         graph_layout.addWidget(self.curve_plot)
-        layout.addWidget(header_group)
-        layout.addWidget(point_group)
+        for group in (header_group, point_group, graph_group):
+            group.setMinimumWidth(0)
+            group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(header_group, 1)
+        layout.addWidget(point_group, 1)
         layout.addWidget(graph_group, 2)
         return panel
 
