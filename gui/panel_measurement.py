@@ -3,10 +3,11 @@ from datetime import datetime
 
 import pyqtgraph as pg
 from core.data_logger import DataLogger
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from .widget_graph_selection import GraphSelectionTree
@@ -24,6 +25,11 @@ class MeasurementPanels:
         self.series = {}
         self.curves = {}
         self.curve_colors = {}
+        self.graph_selectors = []
+        self.graph_panes = []
+        self.plots = []
+        self.legends = []
+        self.plot_curves = []
         self.column_devices = {}
         self.columns = ["datetime", "elapsed_s"]
         for device_id, plugin in plugins.items():
@@ -43,29 +49,71 @@ class MeasurementPanels:
     def _build_graph_widget(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        self.graph_selector = GraphSelectionTree(self.plugins)
-        self.graph_selector.setMaximumHeight(180)
-        self.graph_selector.selection_changed.connect(self.apply_selection)
-        layout.addWidget(self.graph_selector)
-
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Data Graphs"))
+        controls.addStretch()
+        self.split_graph_button = QToolButton()
+        self.split_graph_button.setText("◫")
+        self.split_graph_button.setToolTip("Split graph view")
+        self.split_graph_button.setCheckable(True)
+        self.split_graph_button.setFixedSize(36, 30)
+        self.split_graph_button.setStyleSheet("font-size:17pt; font-weight:bold;")
+        self.split_graph_button.toggled.connect(self.set_split_graph)
+        controls.addWidget(self.split_graph_button)
+        layout.addLayout(controls)
         pg.setConfigOption("background", "#202124")
         pg.setConfigOption("foreground", "#e8eaed")
-        graph_group = QGroupBox("Graph Area")
+        self.graph_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.graph_splitter.addWidget(self._build_plot_pane(1))
+        self.graph_splitter.addWidget(self._build_plot_pane(2))
+        self.graph_panes[1].setVisible(False)
+        layout.addWidget(self.graph_splitter, 1)
+        self.graph_selector = self.graph_selectors[0]
+        self.plot = self.plots[0]
+        self.legend = self.legends[0]
+        self.curves = self.plot_curves[0]
+        self._update_legends()
+        return panel
+
+    def _build_plot_pane(self, number):
+        pane = QWidget()
+        pane_layout = QVBoxLayout(pane)
+        pane_layout.setContentsMargins(0, 0, 0, 0)
+        selector = GraphSelectionTree(self.plugins)
+        selector.setMaximumHeight(80)
+        selector.selection_changed.connect(self.apply_selection)
+        pane_layout.addWidget(selector)
+        graph_group = QGroupBox(f"Graph {number}")
         graph_layout = QVBoxLayout(graph_group)
-        self.plot = pg.PlotWidget()
-        self.plot.setLabel("bottom", "Time", units="s")
-        self.legend = self.plot.addLegend(offset=(-10, 10))
+        plot = pg.PlotWidget()
+        plot.setLabel("bottom", "Time", units="s")
+        legend = plot.addLegend(offset=(-10, 10))
+        curves = {}
         for index, label in enumerate(self.columns[2:]):
             color = self.COLORS[index % len(self.COLORS)]
             self.curve_colors[label] = color
-            self.curves[label] = self.plot.plot(
-                [], [], pen=pg.mkPen(color, width=2)
-            )
-            self.curves[label].setVisible(False)
-        graph_layout.addWidget(self.plot)
-        layout.addWidget(graph_group, 1)
-        self._update_legend()
-        return panel
+            curves[label] = plot.plot([], [], pen=pg.mkPen(color, width=2))
+            curves[label].setVisible(False)
+        graph_layout.addWidget(plot)
+        pane_layout.addWidget(graph_group, 1)
+        self.graph_selectors.append(selector)
+        self.graph_panes.append(pane)
+        self.plots.append(plot)
+        self.legends.append(legend)
+        self.plot_curves.append(curves)
+        return pane
+
+    def set_split_graph(self, enabled):
+        minimum_width = 420 if enabled else 0
+        for pane in self.graph_panes:
+            pane.setMinimumWidth(minimum_width)
+        self.graph_panes[1].setVisible(enabled)
+        self.split_graph_button.setText("▣" if enabled else "◫")
+        self.split_graph_button.setToolTip("Merge graph view" if enabled else "Split graph view")
+        if enabled:
+            width = max(600, self.graph_splitter.width())
+            self.graph_splitter.setSizes([width // 2, width // 2])
+        self.apply_selection()
 
     def _build_table_widget(self):
         panel = QWidget()
@@ -96,9 +144,12 @@ class MeasurementPanels:
         return group
 
     def selected_columns(self):
+        selected_labels = set(self.graph_selectors[0].selected_labels())
+        if self.split_graph_button.isChecked():
+            selected_labels.update(self.graph_selectors[1].selected_labels())
         return ["datetime", "elapsed_s"] + [
             label for label in self.columns[2:]
-            if label in self.graph_selector.selected_labels()
+            if label in selected_labels
         ]
 
     def apply_selection(self, _checked=None):
@@ -107,16 +158,23 @@ class MeasurementPanels:
             connected = self.manager.get_device(self.column_devices[label]) is not None
             visible = label in selected and connected
             self.table.setColumnHidden(index, not visible)
-            self.curves[label].setVisible(visible)
-        self._update_legend()
+        for graph_index, curves in enumerate(self.plot_curves):
+            graph_selected = self.graph_selectors[graph_index].selected_labels()
+            pane_visible = graph_index == 0 or self.split_graph_button.isChecked()
+            for label, curve in curves.items():
+                connected = self.manager.get_device(self.column_devices[label]) is not None
+                curve.setVisible(pane_visible and label in graph_selected and connected)
+        self._update_legends()
 
-    def _update_legend(self):
-        self.legend.clear()
-        selected = set(self.selected_columns())
-        for label, curve in self.curves.items():
-            if label in selected:
-                self.legend.addItem(curve, label)
-                self.legend.items[-1][1].setText(label, color=self.curve_colors[label])
+    def _update_legends(self):
+        for graph_index, legend in enumerate(self.legends):
+            legend.clear()
+            selected = self.graph_selectors[graph_index].selected_labels()
+            for label, curve in self.plot_curves[graph_index].items():
+                connected = self.manager.get_device(self.column_devices[label]) is not None
+                if label in selected and connected:
+                    legend.addItem(curve, label)
+                    legend.items[-1][1].setText(label, color=self.curve_colors[label])
 
     def start(self):
         if not self.timer.isActive():
@@ -124,12 +182,13 @@ class MeasurementPanels:
 
     def set_theme(self, theme):
         dark = theme == "dark"
-        self.plot.setBackground("#202124" if dark else "#ffffff")
         foreground = "#e8eaed" if dark else "#202124"
-        for axis_name in ("left", "bottom"):
-            axis = self.plot.getAxis(axis_name)
-            axis.setPen(foreground)
-            axis.setTextPen(foreground)
+        for plot in self.plots:
+            plot.setBackground("#202124" if dark else "#ffffff")
+            for axis_name in ("left", "bottom"):
+                axis = plot.getAxis(axis_name)
+                axis.setPen(foreground)
+                axis.setTextPen(foreground)
 
     def stop_if_empty(self):
         if not self.manager.devices:
@@ -158,7 +217,8 @@ class MeasurementPanels:
             except (TypeError, ValueError):
                 numeric = float("nan")
             self.series[label].append(numeric)
-            self.curves[label].setData(self.times, self.series[label])
+            for curves in self.plot_curves:
+                curves[label].setData(self.times, self.series[label])
 
     def _append_table_row(self, row):
         table_row = self.table.rowCount()
@@ -183,6 +243,7 @@ class MeasurementPanels:
         self.times.clear()
         for label in self.series:
             self.series[label].clear()
-            self.curves[label].setData([], [])
+            for curves in self.plot_curves:
+                curves[label].setData([], [])
         self.t0 = time.time()
         self.log("Table cleared")

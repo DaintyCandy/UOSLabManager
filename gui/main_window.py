@@ -1,13 +1,16 @@
 import os
 from datetime import datetime
 
-from PyQt6.QtGui import QAction, QColor
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QScrollArea, QSplitter, QTabBar, QTabWidget, QToolBar
+from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtWidgets import (
+    QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSplitter,
+    QSizePolicy, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+)
 
 from core import DeviceManager, load_device_plugins
 from .panel_dashboard import DashboardPanel
-from .panel_camera import CameraPanel
+from .panel_camera import CameraWorkspace
 from .panel_measurement import MeasurementPanels
 from .panel_sequence import SequencePanel
 from .panel_settings import SettingsPanel
@@ -16,13 +19,14 @@ __all__ = ["MainWindow"]
 
 
 class MainWindow(QMainWindow):
-    """Main tab workspace with device settings opened from the toolbar."""
+    """Main tab workspace with a compact status header."""
 
     def __init__(self, theme_manager):
         super().__init__()
         self.theme_manager = theme_manager
         self.setWindowTitle("UOS Lab Manager")
-        self.resize(1120, 720)
+        self.resize(1360, 800)
+        self.window_settings = QSettings("UOSLabManager", "UOSLabManager")
         self.manager = DeviceManager()
         self.plugins = load_device_plugins()
         self.device_tabs = {}
@@ -33,29 +37,22 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.measurement = MeasurementPanels(self.manager, self.plugins, self.log)
         self.sequence_panel = SequencePanel(self.manager, self.log)
-        output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "camera_recordings")
-        self.camera_panel = CameraPanel(output_dir, self.log)
+        default_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "camera_recordings")
+        output_dir = self.window_settings.value("camera/output_dir", default_output_dir)
+        self.camera_panel = CameraWorkspace(output_dir, self.log)
 
-        experiment_left = QSplitter(Qt.Orientation.Vertical)
-        experiment_left.addWidget(self.sequence_panel)
-        experiment_left.addWidget(self.measurement.log_widget)
-        experiment_left.setStretchFactor(0, 3)
-        experiment_left.setStretchFactor(1, 2)
-        experiment_left.setSizes([400, 240])
+        self.data_workspace = QSplitter(Qt.Orientation.Vertical)
+        self.data_workspace.addWidget(self.measurement.graph_widget)
+        self.data_workspace.addWidget(self.measurement.table_widget)
+        self.data_workspace.setStretchFactor(0, 3)
+        self.data_workspace.setStretchFactor(1, 2)
+        self.data_workspace.setSizes([420, 280])
 
-        experiment_right = QSplitter(Qt.Orientation.Vertical)
-        experiment_right.addWidget(self.measurement.graph_widget)
-        experiment_right.addWidget(self.measurement.table_widget)
-        experiment_right.setStretchFactor(0, 3)
-        experiment_right.setStretchFactor(1, 3)
-        experiment_right.setSizes([340, 300])
-
-        self.experiment_workspace = QSplitter(Qt.Orientation.Horizontal)
-        self.experiment_workspace.addWidget(experiment_left)
-        self.experiment_workspace.addWidget(experiment_right)
-        self.experiment_workspace.setStretchFactor(0, 1)
-        self.experiment_workspace.setStretchFactor(1, 6)
-        self.experiment_workspace.setSizes([330, 740])
+        self.sequence_workspace = QWidget()
+        sequence_layout = QHBoxLayout(self.sequence_workspace)
+        sequence_layout.setContentsMargins(4, 4, 4, 4)
+        sequence_layout.addWidget(self.sequence_panel, 2)
+        sequence_layout.addWidget(self.measurement.log_widget, 1)
         self.dashboard = DashboardPanel(
             self.manager, self.plugins, self.measurement, self.open_device_tab,
             self.emergency_stop,
@@ -66,55 +63,108 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(False)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
-        self.tabs.addTab(self.dashboard, "Main")
-        self.tabs.addTab(self.experiment_workspace, "Experiment")
+        self.tabs.addTab(self.data_workspace, "Data")
+        self.tabs.addTab(self.sequence_workspace, "Sequence")
         self.tabs.addTab(self.camera_panel, "Camera")
         for index, color in enumerate(("#4da3ff", "#ffb74d", "#66bb6a")):
             self.tabs.tabBar().setTabTextColor(index, QColor(color))
             self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
             self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
-        self.setCentralWidget(self.tabs)
-        self._create_toolbar()
+        self.tabs.setCurrentIndex(0)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._build_header())
+        self.dashboard.setFixedWidth(240)
+        self.sidebar_open = True
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self.dashboard)
+        toggle_strip = QWidget()
+        toggle_strip.setFixedWidth(18)
+        toggle_layout = QVBoxLayout(toggle_strip)
+        toggle_layout.setContentsMargins(1, 0, 1, 0)
+        self.sidebar_toggle_button = QToolButton()
+        self.sidebar_toggle_button.setText("◀")
+        self.sidebar_toggle_button.setToolTip("Collapse or expand the device panel")
+        self.sidebar_toggle_button.setFixedWidth(16)
+        self.sidebar_toggle_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.sidebar_toggle_button.setStyleSheet(
+            "QToolButton { font-size:9pt; font-weight:bold; border:1px solid #777; "
+            "border-radius:3px; background:palette(button); }"
+            "QToolButton:hover { background:#4d78a8; color:white; }"
+        )
+        self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
+        toggle_layout.addWidget(self.sidebar_toggle_button)
+        body_layout.addWidget(toggle_strip)
+        body_layout.addWidget(self.tabs, 1)
+        central_layout.addWidget(body, 1)
+        self.setCentralWidget(central)
         self.apply_theme_to_panels(self.theme_manager.current_theme)
         self.update_device_status()
+        self.restore_window_layout()
 
-    def _create_toolbar(self):
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        main_action = QAction("MAIN", self)
-        main_action.triggered.connect(lambda _: self.tabs.setCurrentIndex(0))
-        toolbar.addAction(main_action)
-        experiment_action = QAction("EXPERIMENT", self)
-        experiment_action.triggered.connect(lambda _: self.tabs.setCurrentIndex(1))
-        toolbar.addAction(experiment_action)
-        camera_action = QAction("CAMERA", self)
-        camera_action.triggered.connect(lambda _: self.tabs.setCurrentIndex(2))
-        toolbar.addAction(camera_action)
+    def _build_header(self):
+        header = QWidget()
+        header.setObjectName("mainHeader")
+        header.setFixedHeight(46)
+        header.setStyleSheet("#mainHeader { border-bottom: 1px solid #666; }")
+        layout = QHBoxLayout(header)
+        layout.setContentsMargins(8, 5, 8, 5)
+        left_slot = QWidget()
+        left_slot.setFixedWidth(110)
+        left_layout = QHBoxLayout(left_slot)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        settings = QPushButton("⚙")
+        settings.setToolTip("Settings")
+        settings.setFixedSize(36, 34)
+        settings.setStyleSheet("font-size:14pt; font-weight:bold;")
+        settings.clicked.connect(self.open_settings_tab)
+        left_layout.addWidget(settings)
+        left_layout.addStretch()
+        layout.addWidget(left_slot)
+        layout.addStretch()
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet("font-size:12pt; font-weight:600;")
+        layout.addWidget(self.clock_label)
+        layout.addStretch()
+        stop = QPushButton("STOP")
+        stop.setToolTip("Emergency stop and disconnect all devices")
+        stop.setFixedSize(110, 34)
+        stop.setStyleSheet(
+            "QPushButton { background:#c62828; color:white; font-size:12pt; "
+            "font-weight:900; border:2px solid #ff8a80; border-radius:6px; }"
+            "QPushButton:hover { background:#e53935; }"
+            "QPushButton:pressed { background:#8e0000; }"
+        )
+        stop.clicked.connect(self.emergency_stop)
+        layout.addWidget(stop)
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(1000)
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start()
+        self.update_clock()
+        return header
 
-        settings_action = QAction("SETTINGS", self)
-        settings_action.triggered.connect(self.open_settings_tab)
-        toolbar.addAction(settings_action)
+    def update_clock(self):
+        self.clock_label.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
 
-        toolbar.addSeparator()
-        for device_id, plugin in self.plugins.items():
-            action = QAction(plugin.display_name, self)
-            action.setToolTip(f"Open {plugin.display_name} settings")
-            action.triggered.connect(lambda _, key=device_id: self.open_device_tab(key))
-            toolbar.addAction(action)
+    def toggle_sidebar(self, _checked=False):
+        self.set_sidebar_visible(not self.sidebar_open)
 
-        toolbar.addSeparator()
-        stop = QAction("DISCONNECT ALL", self)
-        stop.triggered.connect(self.disconnect_all)
-        toolbar.addAction(stop)
-        exit_action = QAction("EXIT", self)
-        exit_action.triggered.connect(self.close)
-        toolbar.addAction(exit_action)
+    def set_sidebar_visible(self, visible):
+        self.sidebar_open = bool(visible)
+        self.dashboard.setVisible(self.sidebar_open)
+        self.sidebar_toggle_button.setText("◀" if self.sidebar_open else "▶")
 
     def open_settings_tab(self, _checked=False):
         if self.settings_panel is None:
             self.settings_panel = SettingsPanel(
-                self.theme_manager, self.apply_theme_to_panels, self
+                self.theme_manager, self.apply_theme_to_panels, self,
+                camera_workspace=self.camera_panel,
             )
             index = self.tabs.addTab(self.settings_panel, "Settings")
         else:
@@ -205,6 +255,35 @@ class MainWindow(QMainWindow):
         self.log("EMERGENCY STOP ACTIVATED")
 
     def closeEvent(self, event):
+        self.save_window_layout()
         self.camera_panel.stop_preview()
         self.disconnect_all()
         event.accept()
+
+    def save_window_layout(self):
+        self.window_settings.setValue("window/geometry", self.saveGeometry())
+        self.window_settings.setValue("splitter/data", self.data_workspace.saveState())
+        self.window_settings.setValue("splitter/graphs", self.measurement.graph_splitter.saveState())
+        self.window_settings.setValue("splitter/cameras", self.camera_panel.splitter.saveState())
+        self.window_settings.setValue("data/split_graph", self.measurement.split_graph_button.isChecked())
+        self.window_settings.setValue("camera/split_view", self.camera_panel.split_button.isChecked())
+        self.window_settings.setValue("sidebar/open", self.sidebar_open)
+
+    def restore_window_layout(self):
+        geometry = self.window_settings.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        for key, splitter in (
+            ("splitter/data", self.data_workspace),
+            ("splitter/graphs", self.measurement.graph_splitter),
+            ("splitter/cameras", self.camera_panel.splitter),
+        ):
+            state = self.window_settings.value(key)
+            if state is not None:
+                splitter.restoreState(state)
+        sidebar_open = self.window_settings.value("sidebar/open", True, type=bool)
+        self.set_sidebar_visible(sidebar_open)
+        split_graph = self.window_settings.value("data/split_graph", False, type=bool)
+        self.measurement.split_graph_button.setChecked(split_graph)
+        split_camera = self.window_settings.value("camera/split_view", False, type=bool)
+        self.camera_panel.split_button.setChecked(split_camera)

@@ -6,14 +6,32 @@ from copy import deepcopy
 from pathlib import Path
 
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QProgressDialog, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .driver import LakeShore331
+
+
+class CurveHeaderLoadWorker(QThread):
+    loaded = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, device, curve, parent=None):
+        super().__init__(parent)
+        self.device = device
+        self.curve = curve
+
+    def run(self):
+        try:
+            header = self.device.get_curve_header(self.curve)
+            points = self.device.get_curve_points(self.curve)
+            self.loaded.emit((header, points))
+        except Exception as error:
+            self.failed.emit(str(error))
 
 
 class LakeShore331Window(QWidget):
@@ -74,7 +92,6 @@ class LakeShore331Window(QWidget):
         self.settings_tabs.addTab(self._build_input_tab("B"), "Input B")
         self.settings_tabs.addTab(self._build_loop_tab(1), "Loop 1")
         self.settings_tabs.addTab(self._build_loop_tab(2), "Loop 2")
-        self.settings_tabs.addTab(self._build_ramp_tab(), "Ramp")
         self.settings_tabs.addTab(self._build_safety_tab(), "Safety")
         self.settings_tabs.addTab(self._build_curve_editor_tab(), "Curve Editing")
         root.addWidget(self.settings_tabs)
@@ -109,13 +126,16 @@ class LakeShore331Window(QWidget):
         layout.addWidget(self.status_label, 0, 4)
         layout.addWidget(connect, 0, 5)
         layout.addWidget(disconnect, 0, 6)
+        self.response_label = QLabel("Response: -")
+        layout.addWidget(self.response_label, 1, 0, 1, 3)
         self.summary_labels = {}
         for row, (key, title) in enumerate((
             ("input_a", "Input A"), ("input_b", "Input B"),
-            ("loop_1", "Loop 1"), ("ramp", "Ramp"), ("safety", "Safety"),
-        ), start=1):
+            ("loop_1", "Loop 1"), ("loop_2", "Loop 2"), ("safety", "Safety"),
+        ), start=2):
             layout.addWidget(QLabel(title), row, 0)
             label = QLabel("-")
+            label.setWordWrap(True)
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             layout.addWidget(label, row, 1, 1, 6)
             self.summary_labels[key] = label
@@ -138,15 +158,13 @@ class LakeShore331Window(QWidget):
         sensor_form = QFormLayout(sensor_group)
         processing_group = QGroupBox("Curve and Processing")
         processing_form = QFormLayout(processing_group)
-        enabled = QCheckBox("Use this input in the program")
-        enabled.setChecked(True)
         input_name = QLineEdit(f"Input {channel}")
         hardware = QLabel("Diode/RTD")
         sensor = QComboBox()
         for name, value in self.SENSOR_TYPES:
             sensor.addItem(name, value)
-        sensor_range = QComboBox()
-        excitation = QComboBox()
+        sensor_range = QLabel("-")
+        excitation = QLabel("-")
         curve = QComboBox()
         preferred_unit = QComboBox()
         preferred_unit.addItems(("K", "°C", "Sensor units"))
@@ -156,10 +174,9 @@ class LakeShore331Window(QWidget):
         filter_points.setValue(8)
         temperature = QLabel("-")
         sensor_reading = QLabel("-")
-        sensor_form.addRow("Input Enabled", enabled)
         sensor_form.addRow("Input Name", input_name)
-        sensor_form.addRow("Hardware Type", hardware)
         sensor_form.addRow("Sensor Type", sensor)
+        sensor_form.addRow("Hardware Type", hardware)
         sensor_form.addRow("Sensor Range", sensor_range)
         sensor_form.addRow("Excitation", excitation)
         processing_form.addRow("Curve", curve)
@@ -185,7 +202,7 @@ class LakeShore331Window(QWidget):
         layout.addWidget(processing_group)
         layout.addWidget(tracking_group, 2)
         self.input_controls[channel] = {
-            "enabled": enabled, "name": input_name, "hardware": hardware,
+            "name": input_name, "hardware": hardware,
             "sensor": sensor, "range": sensor_range, "excitation": excitation,
             "curve": curve, "preferred_unit": preferred_unit,
             "filter": filter_enabled, "filter_points": filter_points,
@@ -213,11 +230,9 @@ class LakeShore331Window(QWidget):
             8: ("Diode/RTD", "2.5 V range", "1 mA"),
             9: ("Diode/RTD", "7.5 V range", "1 mA"),
         }[sensor_code]
-        controls["range"].clear()
-        controls["range"].addItem(details[1], sensor_code)
+        controls["range"].setText(details[1])
         controls["hardware"].setText(details[0])
-        controls["excitation"].clear()
-        controls["excitation"].addItem(details[2])
+        controls["excitation"].setText(details[2])
         self.populate_curve_options(channel)
 
     def populate_curve_options(self, channel):
@@ -250,17 +265,25 @@ class LakeShore331Window(QWidget):
 
     def _build_loop_tab(self, loop):
         panel = QWidget()
-        layout = QHBoxLayout(panel)
+        layout = QVBoxLayout(panel)
+        groups_layout = QHBoxLayout()
         controls = {
             "mode": QComboBox(), "input": QComboBox(), "units": QComboBox(),
             "setpoint": self._spin(-273.15, 1000, 300), "powerup": QCheckBox("Restore output after restart"),
             "display": QComboBox(), "resistance": self._spin(0.1, 10000, 50),
-            "range": QComboBox(), "heater_manual": self._spin(0, 100, 0),
+            "range": QComboBox(),
             "estimated_current": QLabel("0 A"), "estimated_power": QLabel("0 W"),
             "output_limit": self._spin(0, 100, 80), "preset": QComboBox(),
             "p": self._spin(0, 1000, 10), "i": self._spin(0, 1000, 20),
             "d": self._spin(0, 200, 0), "pid_manual": self._spin(0, 100, 0),
+            "enabled": QCheckBox("Enable Loop 2") if loop == 2 else None,
+            "ramp_enabled": QCheckBox("Enabled"),
+            "ramp_rate": self._spin(0.001, 100, 1.0),
+            "tune_status": QLabel("Inactive"),
         }
+        if controls["enabled"] is not None:
+            controls["enabled"].setChecked(True)
+            layout.addWidget(controls["enabled"])
         controls["mode"].addItem("Off", 0)
         controls["mode"].addItem("Open Loop", 3)
         controls["mode"].addItem("Closed Loop", 1)
@@ -285,59 +308,73 @@ class LakeShore331Window(QWidget):
         control_form.addRow("Control Input", controls["input"])
         control_form.addRow("Setpoint Unit", controls["units"])
         control_form.addRow("Setpoint", controls["setpoint"])
-        control_form.addRow("Power-up Heater", controls["powerup"])
-        control_form.addRow("Output Display", controls["display"])
+        control_form.addRow("Ramp", controls["ramp_enabled"])
+        control_form.addRow("Ramp Rate [K/min]", controls["ramp_rate"])
 
         heater_group = QGroupBox("Heater")
         heater_form = QFormLayout(heater_group)
-        heater_form.addRow("Heater Resistance [Ω]", controls["resistance"])
+        heater_form.addRow("Power-up Heater", controls["powerup"])
+        heater_form.addRow("Output Display", controls["display"])
         heater_form.addRow("Heater Range", controls["range"])
-        heater_form.addRow("Manual Output [%]", controls["heater_manual"])
+        heater_form.addRow("Output Limit [%]", controls["output_limit"])
+        heater_form.addRow("Heater Resistance [Ω]", controls["resistance"])
         heater_form.addRow("Estimated Current", controls["estimated_current"])
         heater_form.addRow("Estimated Power", controls["estimated_power"])
-        heater_form.addRow("Output Limit [%]", controls["output_limit"])
         controls["estimated_current"].setToolTip("Software estimate using the selected range and heater resistance.")
         controls["estimated_power"].setToolTip("Range full-scale assumptions: Low 0.5 W, Medium 5 W, High 50 W.")
-        controls["output_limit"].setToolTip("Software safety limit applied before writing Manual Output.")
+        controls["output_limit"].setToolTip("Software safety limit applied to PID Manual Output.")
 
         pid_group = QGroupBox("PID")
         pid_form = QFormLayout(pid_group)
-        pid_form.addRow("Preset", controls["preset"])
         pid_form.addRow("P [0–1000]", controls["p"])
         pid_form.addRow("I [0–1000]", controls["i"])
         pid_form.addRow("D [0–200%]", controls["d"])
         pid_form.addRow("Manual Output [%]", controls["pid_manual"])
+        pid_form.addRow("Preset", controls["preset"])
+        pid_form.addRow("Tune Activated", controls["tune_status"])
 
-        layout.addWidget(control_group)
-        layout.addWidget(heater_group)
-        layout.addWidget(pid_group)
+        groups_layout.addWidget(control_group)
+        groups_layout.addWidget(heater_group)
+        groups_layout.addWidget(pid_group)
+        layout.addLayout(groups_layout)
         self.loop_controls[loop] = controls
+        if controls["enabled"] is not None:
+            configurable = (control_group, heater_group, pid_group)
+            controls["enabled"].toggled.connect(
+                lambda checked, number=loop, widgets=configurable: self.set_loop_ui_enabled(number, checked, widgets)
+            )
         controls["preset"].currentIndexChanged.connect(lambda _, number=loop: self.apply_pid_preset(number))
-        controls["heater_manual"].valueChanged.connect(lambda value, number=loop: self.sync_manual_output(number, value, "heater_manual"))
-        controls["pid_manual"].valueChanged.connect(lambda value, number=loop: self.sync_manual_output(number, value, "pid_manual"))
-        for key in ("resistance", "range", "heater_manual", "output_limit", "display"):
+        for key in ("resistance", "range", "pid_manual", "output_limit", "display"):
             signal = controls[key].currentIndexChanged if isinstance(controls[key], QComboBox) else controls[key].valueChanged
             signal.connect(lambda _, number=loop: self.update_heater_estimate(number))
+        self.update_tune_status(loop)
         return panel
 
     def apply_pid_preset(self, loop):
         controls = self.loop_controls[loop]
         if controls["preset"].currentData() != 1:
             controls["mode"].setCurrentIndex(max(0, controls["mode"].findData(1)))
+        self.update_tune_status(loop)
 
-    def sync_manual_output(self, loop, value, source):
+    def set_loop_ui_enabled(self, loop, checked, widgets):
+        for widget in widgets:
+            widget.setEnabled(checked)
+        self.update_tune_status(loop)
+
+    def update_tune_status(self, loop):
         controls = self.loop_controls[loop]
-        target = "pid_manual" if source == "heater_manual" else "heater_manual"
-        controls[target].blockSignals(True)
-        controls[target].setValue(value)
-        controls[target].blockSignals(False)
-        self.update_heater_estimate(loop)
+        loop_enabled = controls["enabled"] is None or controls["enabled"].isChecked()
+        activated = loop_enabled and controls["preset"].currentData() in (4, 5, 6)
+        controls["tune_status"].setText("Activated" if activated else "Inactive")
+        controls["tune_status"].setStyleSheet(
+            f"color:{'#2ecc71' if activated else '#808080'}; font-weight:bold;"
+        )
 
     def update_heater_estimate(self, loop):
         controls = self.loop_controls[loop]
         resistance = controls["resistance"].value()
         range_power = {0: 0.0, 1: 0.5, 2: 5.0, 3: 50.0}[controls["range"].currentData()]
-        output = min(controls["heater_manual"].value(), controls["output_limit"].value()) / 100.0
+        output = min(controls["pid_manual"].value(), controls["output_limit"].value()) / 100.0
         if controls["display"].currentData() == 1:
             full_current = (range_power / resistance) ** 0.5 if range_power else 0.0
             current = full_current * output
@@ -421,19 +458,56 @@ class LakeShore331Window(QWidget):
         return panel
 
     def read_curve_header(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            name, serial_number, data_format, limit, coefficient = self.get_device().get_curve_header(self.curve_number.currentData())
-            self.curve_name.setText(name)
-            self.curve_serial.setText(serial_number)
-            self.curve_format.setCurrentIndex(max(0, self.curve_format.findData(data_format)))
-            self.curve_limit.setValue(limit)
-            self.curve_coefficient.setCurrentIndex(max(0, self.curve_coefficient.findData(coefficient)))
-            self.log("Curve header read")
-        except Exception as error:
-            self.show_error(error)
+        if getattr(self, "curve_load_worker", None) is not None:
+            return
+        curve = self.curve_number.currentData()
+        self.curve_loading_dialog = QProgressDialog(
+            f"Reading user curve {curve} header and points...", None, 0, 0, self
+        )
+        self.curve_loading_dialog.setWindowTitle("Loading Curve")
+        self.curve_loading_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.curve_loading_dialog.setCancelButton(None)
+        self.curve_loading_dialog.setMinimumDuration(0)
+        self.curve_loading_dialog.show()
+        self.curve_load_worker = CurveHeaderLoadWorker(device, curve, self)
+        self.curve_load_worker.loaded.connect(self.curve_loading_completed)
+        self.curve_load_worker.failed.connect(self.curve_loading_failed)
+        self.curve_load_worker.finished.connect(self.curve_loading_finished)
+        self.curve_load_worker.start()
+
+    def curve_loading_completed(self, result):
+        header, points = result
+        name, serial_number, data_format, limit, coefficient = header
+        self.curve_name.setText(name)
+        self.curve_serial.setText(serial_number)
+        self.curve_format.setCurrentIndex(max(0, self.curve_format.findData(data_format)))
+        self.curve_limit.setValue(limit)
+        self.curve_coefficient.setCurrentIndex(max(0, self.curve_coefficient.findData(coefficient)))
+        self.curve_points = {index: point for index, point in enumerate(points, start=1)}
+        self.update_curve_preview()
+        self.close_curve_loading_dialog()
+        self.log(f"Curve header and {len(points)} points read")
+
+    def curve_loading_failed(self, message):
+        self.close_curve_loading_dialog()
+        self.show_error(message)
+
+    def curve_loading_finished(self):
+        worker = self.curve_load_worker
+        self.curve_load_worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def close_curve_loading_dialog(self):
+        dialog = getattr(self, "curve_loading_dialog", None)
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+            self.curve_loading_dialog = None
 
     def write_curve_header(self):
         if self.get_device() is None:
@@ -557,18 +631,6 @@ class LakeShore331Window(QWidget):
         except Exception as error:
             self.show_error(error)
 
-    def _build_ramp_tab(self):
-        panel = QWidget()
-        form = QFormLayout(panel)
-        self.ramp_loop = QComboBox()
-        self.ramp_loop.addItems(("1", "2"))
-        self.ramp_enabled = QCheckBox("Enabled")
-        self.ramp_rate = self._spin(0.001, 100, 1.0)
-        form.addRow("Control loop", self.ramp_loop)
-        form.addRow("Ramp", self.ramp_enabled)
-        form.addRow("Rate [K/min]", self.ramp_rate)
-        return panel
-
     def _build_safety_tab(self):
         panel = QWidget()
         form = QFormLayout(panel)
@@ -588,7 +650,8 @@ class LakeShore331Window(QWidget):
         if self.get_device() is not None:
             return
         try:
-            self.manager.add_device("LS331", LakeShore331(self.port_input.text().strip()))
+            port = self.port_input.text().strip()
+            self.manager.add_device("LS331", lambda: LakeShore331(port))
             self.log("Connected")
             self._notify_main()
             self.read_device()
@@ -614,7 +677,6 @@ class LakeShore331Window(QWidget):
         try:
             for channel in ("A", "B"):
                 controls = self.input_controls[channel]
-                controls["enabled"].setChecked(device.enabled_inputs.get(channel, True))
                 sensor_type, compensation = device.get_input_type(channel)
                 self.set_input_sensor_code(channel, sensor_type)
                 controls["compensation"] = compensation
@@ -635,10 +697,13 @@ class LakeShore331Window(QWidget):
                 controls["setpoint"].setValue(device.get_setpoint(loop))
                 p, i, d = device.get_pid(loop)
                 controls["p"].setValue(p); controls["i"].setValue(i); controls["d"].setValue(d)
-                controls["heater_manual"].setValue(device.get_manual_output(loop))
+                controls["pid_manual"].setValue(device.get_manual_output(loop))
                 controls["preset"].setCurrentIndex(max(0, controls["preset"].findData(control_mode)))
                 display_mode = 3 if control_mode == 3 else 1
                 controls["mode"].setCurrentIndex(max(0, controls["mode"].findData(display_mode)))
+                ramp_enabled, ramp_rate = device.get_ramp(loop)
+                controls["ramp_enabled"].setChecked(ramp_enabled)
+                controls["ramp_rate"].setValue(ramp_rate)
             heater_range = device.get_heater_range()
             self.loop_controls[1]["range"].setCurrentIndex(max(0, self.loop_controls[1]["range"].findData(heater_range)))
             if heater_range == 0:
@@ -647,9 +712,6 @@ class LakeShore331Window(QWidget):
                 )
             for loop in self.loop_controls:
                 self.update_heater_estimate(loop)
-            enabled, rate = device.get_ramp(int(self.ramp_loop.currentText()))
-            self.ramp_enabled.setChecked(enabled)
-            self.ramp_rate.setValue(rate)
             self.snapshot = deepcopy(self.profile_data())
             self.update_summary()
             self.log("Device settings read")
@@ -661,15 +723,18 @@ class LakeShore331Window(QWidget):
         device = self.get_device()
         if device is None:
             self.tracking_timer.stop()
+            self.sync_connection_status()
             return
         elapsed = time.monotonic() - self.tracking_start
         try:
+            state = self.manager.get_latest("LS331")
+            if not state:
+                self.update_realtime_status()
+                return
             for channel in ("A", "B"):
                 controls = self.input_controls[channel]
-                if not controls["enabled"].isChecked():
-                    continue
-                temperature = device.read_temp(channel)
-                sensor_value = device.read_sensor(channel)
+                temperature = state[f"{channel}_temp_K"]
+                sensor_value = state[f"{channel}_sensor"]
                 sensor_code = controls["sensor"].currentData()
                 sensor_unit = "V" if sensor_code in (0, 1, 6, 7, 8, 9) else "Ω"
                 controls["temperature"].setText(f"{temperature:.3f} K")
@@ -685,12 +750,14 @@ class LakeShore331Window(QWidget):
                 controls["temperature_curve"].setData(history["time"], history["temperature"])
                 controls["sensor_curve"].setData(history["time"], history["sensor"])
             self.tracking_error_active = False
+            self.update_realtime_status()
         except Exception as error:
-            # A device can briefly return an empty line while processing a
-            # settings command. Keep the timer alive and retry on the next tick.
-            if not self.tracking_error_active:
-                self.log(f"Tracking read skipped; retrying: {error}")
-                self.tracking_error_active = True
+            self.tracking_timer.stop()
+            self.manager.remove_device("LS331")
+            self.sync_connection_status()
+            self.log(f"Connection lost; changed to Disconnected: {error}")
+            if self.main_window:
+                self.main_window.update_device_status()
 
     def resume_input_tracking(self):
         if self.get_device() is not None and not self.tracking_timer.isActive():
@@ -709,9 +776,7 @@ class LakeShore331Window(QWidget):
                 device.heater_off()
                 raise ValueError("Safety temperature exceeded; heater forced OFF.")
             for channel, controls in self.input_controls.items():
-                device.set_input_enabled(channel, controls["enabled"].isChecked())
-                if not controls["enabled"].isChecked():
-                    continue
+                device.set_input_enabled(channel, True)
                 sensor_code = controls["sensor"].currentData()
                 curve_number = controls["curve"].currentData()
                 device.set_input_type(channel, sensor_code, controls["compensation"])
@@ -730,7 +795,12 @@ class LakeShore331Window(QWidget):
                         f"(requested {curve_number}, read back {applied_curve})."
                     )
             for loop, controls in self.loop_controls.items():
-                manual = min(controls["heater_manual"].value(), controls["output_limit"].value(), self.max_manual_output.value())
+                if loop == 2 and not controls["enabled"].isChecked():
+                    device.set_ramp(False, controls["ramp_rate"].value(), loop)
+                    device.set_manual_output(0, loop)
+                    device.set_control_mode(3, loop)
+                    continue
+                manual = min(controls["pid_manual"].value(), controls["output_limit"].value(), self.max_manual_output.value())
                 mode = controls["mode"].currentData()
                 device.set_control_setup(
                     controls["input"].currentData(), controls["units"].currentData(),
@@ -741,12 +811,11 @@ class LakeShore331Window(QWidget):
                 device.set_setpoint(controls["setpoint"].value(), loop)
                 device.set_pid(controls["p"].value(), controls["i"].value(), controls["d"].value(), loop)
                 device.set_manual_output(manual, loop)
+                device.set_ramp(controls["ramp_enabled"].isChecked(), controls["ramp_rate"].value(), loop)
             loop1 = self.loop_controls[1]
             heater_range = 0 if loop1["mode"].currentData() == 0 else loop1["range"].currentData()
             device.set_heater_range(heater_range)
-            device.set_ramp(self.ramp_enabled.isChecked(), self.ramp_rate.value(), int(self.ramp_loop.currentText()))
             self.snapshot = deepcopy(self.profile_data())
-            self.update_summary()
             self.log("Settings applied")
         except Exception as error:
             self.show_error(error)
@@ -758,9 +827,9 @@ class LakeShore331Window(QWidget):
         return {
             "port": self.port_input.text(),
             "inputs": {channel: {
-                "enabled": c["enabled"].isChecked(), "name": c["name"].text(),
+                "name": c["name"].text(),
                 "sensor": c["sensor"].currentText(), "sensor_code": c["sensor"].currentData(),
-                "excitation": c["excitation"].currentText(), "curve": c["curve"].currentData(),
+                "excitation": c["excitation"].text(), "curve": c["curve"].currentData(),
                 "preferred_unit": c["preferred_unit"].currentText(),
                 "filter": c["filter"].isChecked(), "filter_points": c["filter_points"].value(),
                 "compensation": c["compensation"],
@@ -770,11 +839,13 @@ class LakeShore331Window(QWidget):
                 "units": c["units"].currentData(), "setpoint": c["setpoint"].value(),
                 "powerup": c["powerup"].isChecked(), "display": c["display"].currentData(),
                 "resistance": c["resistance"].value(), "range": c["range"].currentData(),
-                "manual": c["heater_manual"].value(), "output_limit": c["output_limit"].value(),
+                "manual": c["pid_manual"].value(), "output_limit": c["output_limit"].value(),
                 "preset": c["preset"].currentText(), "p": c["p"].value(),
                 "i": c["i"].value(), "d": c["d"].value(),
+                "enabled": True if c["enabled"] is None else c["enabled"].isChecked(),
+                "ramp_enabled": c["ramp_enabled"].isChecked(),
+                "ramp_rate": c["ramp_rate"].value(),
             } for loop, c in self.loop_controls.items()},
-            "ramp": {"loop": int(self.ramp_loop.currentText()), "enabled": self.ramp_enabled.isChecked(), "rate": self.ramp_rate.value()},
             "safety": {"max_temperature": self.max_temperature.value(), "max_manual_output": self.max_manual_output.value(), "heater_off_disconnect": self.heater_off_disconnect.isChecked()},
         }
 
@@ -782,7 +853,6 @@ class LakeShore331Window(QWidget):
         self.port_input.setText(data.get("port", self.port_input.text()))
         for channel, values in data.get("inputs", {}).items():
             controls = self.input_controls[channel]
-            controls["enabled"].setChecked(values.get("enabled", True))
             controls["name"].setText(values.get("name", f"Input {channel}"))
             sensor_code = values.get("sensor_code", 0)
             self.set_input_sensor_code(channel, sensor_code)
@@ -802,19 +872,23 @@ class LakeShore331Window(QWidget):
             controls["display"].setCurrentIndex(max(0, controls["display"].findData(values.get("display", 1))))
             controls["resistance"].setValue(values.get("resistance", 50))
             controls["range"].setCurrentIndex(max(0, controls["range"].findData(values.get("range", 0))))
-            controls["heater_manual"].setValue(values.get("manual", 0))
+            controls["pid_manual"].setValue(values.get("manual", 0))
             controls["output_limit"].setValue(values.get("output_limit", 80))
             controls["preset"].setCurrentText(values.get("preset", "Manual PID"))
+            if controls["enabled"] is not None:
+                controls["enabled"].setChecked(values.get("enabled", True))
+            controls["ramp_enabled"].setChecked(values.get("ramp_enabled", False))
+            controls["ramp_rate"].setValue(values.get("ramp_rate", 1.0))
             self.update_heater_estimate(int(loop_text))
         ramp = data.get("ramp", {})
-        self.ramp_loop.setCurrentText(str(ramp.get("loop", 1)))
-        self.ramp_enabled.setChecked(ramp.get("enabled", False))
-        self.ramp_rate.setValue(ramp.get("rate", 1.0))
+        if ramp:
+            legacy_loop = int(ramp.get("loop", 1))
+            self.loop_controls[legacy_loop]["ramp_enabled"].setChecked(ramp.get("enabled", False))
+            self.loop_controls[legacy_loop]["ramp_rate"].setValue(ramp.get("rate", 1.0))
         safety = data.get("safety", {})
         self.max_temperature.setValue(safety.get("max_temperature", 400))
         self.max_manual_output.setValue(safety.get("max_manual_output", 80))
         self.heater_off_disconnect.setChecked(safety.get("heater_off_disconnect", True))
-        self.update_summary()
 
     def revert(self):
         if self.snapshot is None:
@@ -835,16 +909,22 @@ class LakeShore331Window(QWidget):
         for channel, key in (("A", "input_a"), ("B", "input_b")):
             controls = self.input_controls[channel]
             self.summary_labels[key].setText(
-                f"{controls['name'].text()} | Sensor: {controls['sensor'].currentText()} | "
-                f"Curve: {controls['curve'].currentData()} | Reading: {controls['temperature'].text()} / {controls['reading'].text()}"
+                f"Sensor: {controls['sensor'].currentText()} | "
+                f"Curve: {controls['curve'].currentText()} | "
+                f"Filter: {'Enabled' if controls['filter'].isChecked() else 'Disabled'} | "
+                f"Reading: {controls['temperature'].text()} / {controls['reading'].text()}"
             )
-        loop = self.loop_controls[1]
-        self.summary_labels["loop_1"].setText(
-            f"{loop['mode'].currentText()} | {loop['input'].currentText()} | "
-            f"Setpoint: {loop['setpoint'].value():.3f} {loop['units'].currentText()} | "
-            f"PID: {loop['p'].value():g}, {loop['i'].value():g}, {loop['d'].value():g}"
-        )
-        self.summary_labels["ramp"].setText(f"Loop {self.ramp_loop.currentText()}  |  {'Enabled' if self.ramp_enabled.isChecked() else 'Disabled'}  |  {self.ramp_rate.value():g} K/min")
+        for number, controls in self.loop_controls.items():
+            loop_active = controls["enabled"] is None or controls["enabled"].isChecked()
+            ramp_active = loop_active and controls["ramp_enabled"].isChecked()
+            mode = controls["mode"].currentText() if loop_active else "Disabled"
+            self.summary_labels[f"loop_{number}"].setText(
+                f"Mode: {mode} | Input: {controls['input'].currentText()} | "
+                f"Setpoint: {controls['setpoint'].value():.3f} {controls['units'].currentText()} | "
+                f"Ramp: {'Enabled' if ramp_active else 'Disabled'} ({controls['ramp_rate'].value():g} K/min) | "
+                f"PID: {controls['p'].value():g}, {controls['i'].value():g}, {controls['d'].value():g} | "
+                f"Tune: {controls['tune_status'].text()}"
+            )
         self.summary_labels["safety"].setText(f"Max temperature: {self.max_temperature.value():g} K  |  Max output: {self.max_manual_output.value():g} %")
 
     def sync_connection_status(self):
@@ -857,6 +937,12 @@ class LakeShore331Window(QWidget):
             self.refresh_input_tracking()
         elif not connected:
             self.tracking_timer.stop()
+        self.update_realtime_status()
+
+    def update_realtime_status(self):
+        metrics = self.manager.get_metrics("LS331")
+        response = metrics["response_ms"]
+        self.response_label.setText("Response: -" if response is None else f"Response: {response:.1f} ms")
 
     def _notify_main(self):
         self.sync_connection_status()

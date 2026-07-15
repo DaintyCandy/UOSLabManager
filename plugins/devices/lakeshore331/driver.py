@@ -21,12 +21,17 @@ class LakeShore331:
         return {
             "A_temp_K": self.read_temp("A") if self.enabled_inputs["A"] else "",
             "B_temp_K": self.read_temp("B") if self.enabled_inputs["B"] else "",
+            "A_sensor": self.read_sensor("A") if self.enabled_inputs["A"] else "",
+            "B_sensor": self.read_sensor("B") if self.enabled_inputs["B"] else "",
             "setpoint_K": self.get_setpoint(loop=1),
             "heater_range": self.get_heater_range(),
         }
 
     def set_input_enabled(self, channel: str, enabled: bool):
         self.enabled_inputs[channel.upper()] = bool(enabled)
+
+    def get_input_enabled(self, channel: str) -> bool:
+        return self.enabled_inputs.get(channel.upper(), False)
     
     def close(self):
         if self.ser and self.ser.is_open:
@@ -194,6 +199,16 @@ class LakeShore331:
     def get_curve_point(self, curve: int, index: int):
         sensor_units, temperature = self.query(f"CRVPT? {curve},{index}").split(",")
         return float(sensor_units), float(temperature)
+
+    def get_curve_points(self, curve: int):
+        """Read programmed points, stopping at the first unused 0/0 entry."""
+        points = []
+        for index in range(1, 201):
+            sensor_units, temperature = self.get_curve_point(curve, index)
+            if sensor_units == 0.0 and temperature == 0.0:
+                break
+            points.append((sensor_units, temperature))
+        return points
 
     def set_curve_point(self, curve: int, index: int, sensor_units: float, temperature: float):
         if not 21 <= curve <= 41 or not 1 <= index <= 200:

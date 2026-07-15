@@ -106,7 +106,4 @@ class ZUP36_12:
         }
 
     def read_all(self):
-        try:
-            return self.read_monitoring()
-        except Exception as error:
-            return {"error": str(error), "communication_error": True}
+        return self.read_monitoring()

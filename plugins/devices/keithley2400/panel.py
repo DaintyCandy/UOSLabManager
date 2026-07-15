@@ -63,13 +63,15 @@ class Keithley2400Panel(QWidget):
         layout.addWidget(self.status_label, 0, 3)
         layout.addWidget(connect, 0, 4)
         layout.addWidget(disconnect, 0, 5)
+        self.response_label = QLabel("Response: -")
+        layout.addWidget(self.response_label, 1, 0, 1, 2)
         self.monitor_labels = {}
         for row, (key, title) in enumerate((
             ("voltage", "Actual Voltage"), ("current", "Actual Current"),
             ("power", "Calculated Power P=VI"), ("resistance", "Calculated Resistance V/I"),
             ("source", "Source Mode"), ("output", "Output Status"),
             ("compliance", "Compliance / OVP"), ("communication", "Communication Error"),
-        ), start=1):
+        ), start=2):
             layout.addWidget(QLabel(title), row, 0, 1, 2)
             label = QLabel("-")
             layout.addWidget(label, row, 2, 1, 4)
@@ -164,7 +166,8 @@ class Keithley2400Panel(QWidget):
         if self.get_device() is not None:
             return
         try:
-            self.manager.add_device("K2400", Keithley2400(self.address_input.text().strip()))
+            address = self.address_input.text().strip()
+            self.manager.add_device("K2400", lambda: Keithley2400(address))
             self.log("Connected")
             self.monitor_timer.start()
             self._notify_main()
@@ -184,9 +187,14 @@ class Keithley2400Panel(QWidget):
     def refresh_monitoring(self):
         device = self.get_device()
         if device is None:
+            self.monitor_timer.stop()
+            self.sync_connection_status()
             return
         try:
-            state = device.read_monitoring()
+            state = self.manager.get_latest("K2400")
+            if not state:
+                self.update_realtime_status()
+                return
             self.monitor_labels["voltage"].setText(f"{state['voltage_V']:.6g} V")
             self.monitor_labels["current"].setText(f"{state['current_A']:.6g} A")
             self.monitor_labels["power"].setText(f"{state['power_W']:.6g} W")
@@ -202,9 +210,15 @@ class Keithley2400Panel(QWidget):
             if state["compliance"] and self.block_on_compliance.isChecked() and state["output_on"]:
                 device.output_off()
                 self.log("Safety interlock: output disabled by compliance")
+            self.update_realtime_status()
         except Exception as error:
             self.monitor_labels["communication"].setText(str(error))
-            self.log(f"Communication error: {error}")
+            self.monitor_timer.stop()
+            self.manager.remove_device("K2400")
+            self.sync_connection_status()
+            self.log(f"Connection lost; changed to Disconnected: {error}")
+            if self.main_window:
+                self.main_window.update_device_status()
 
     def read_device(self):
         if self.get_device() is None:
@@ -308,6 +322,12 @@ class Keithley2400Panel(QWidget):
             self.monitor_timer.start()
         elif not connected:
             self.monitor_timer.stop()
+        self.update_realtime_status()
+
+    def update_realtime_status(self):
+        metrics = self.manager.get_metrics("K2400")
+        response = metrics["response_ms"]
+        self.response_label.setText("Response: -" if response is None else f"Response: {response:.1f} ms")
 
     def _notify_main(self):
         self.sync_connection_status()

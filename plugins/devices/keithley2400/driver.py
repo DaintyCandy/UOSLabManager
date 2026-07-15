@@ -98,10 +98,7 @@ class Keithley2400:
         }
 
     def read_all(self):
-        try:
-            return self.read_monitoring()
-        except Exception as error:
-            return {"error": str(error), "communication_error": True}
+        return self.read_monitoring()
 
     def measure_voltage(self):
         return float(self.query(":MEAS:VOLT?"))
