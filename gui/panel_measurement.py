@@ -65,8 +65,11 @@ class MeasurementPanels:
         pg.setConfigOption("background", "#202124")
         pg.setConfigOption("foreground", "#e8eaed")
         self.graph_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.graph_splitter.setHandleWidth(0)
+        self.graph_splitter.setChildrenCollapsible(False)
         self.graph_splitter.addWidget(self._build_plot_pane(1))
         self.graph_splitter.addWidget(self._build_plot_pane(2))
+        self.graph_splitter.handle(1).setEnabled(False)
         self.graph_panes[1].setVisible(False)
         layout.addWidget(self.graph_splitter, 1)
         self.graph_selector = self.graph_selectors[0]
@@ -86,8 +89,14 @@ class MeasurementPanels:
         pane_layout.addWidget(selector)
         graph_group = QGroupBox(f"Graph {number}")
         graph_layout = QVBoxLayout(graph_group)
+        # Keep the axis titles away from the group-box border without changing
+        # the spacing between axis titles and tick values.
+        graph_layout.setContentsMargins(20, 20, 20, 30)
         plot = pg.PlotWidget()
         plot.setLabel("bottom", "Time", units="s")
+        # qdarktheme uses a taller label font than pyqtgraph's automatic axis
+        # geometry reserves, so leave space *outside* the axis title.
+        plot.getAxis("bottom").setHeight(30)
         legend = plot.addLegend(offset=(-10, 10))
         curves = {}
         for index, label in enumerate(self.columns[2:]):
@@ -112,8 +121,7 @@ class MeasurementPanels:
         self.split_graph_button.setText("▣" if enabled else "◫")
         self.split_graph_button.setToolTip("Merge graph view" if enabled else "Split graph view")
         if enabled:
-            width = max(600, self.graph_splitter.width())
-            self.graph_splitter.setSizes([width // 2, width // 2])
+            self.graph_splitter.setSizes([1, 1])
         self.apply_selection()
 
     def _build_table_widget(self):
