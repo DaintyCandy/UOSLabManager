@@ -20,6 +20,7 @@ class MeasurementPanels:
         self.manager = manager
         self.plugins = plugins
         self.log = log_callback
+        self.get_rheed_profile = lambda: None 
         self.t0 = time.time()
         self.times = []
         self.series = {}
@@ -117,7 +118,6 @@ class MeasurementPanels:
 
     def _build_table_widget(self):
         panel = QWidget()
-        panel.setMinimumHeight(220)
         layout = QVBoxLayout(panel)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Data Table"))
@@ -135,7 +135,6 @@ class MeasurementPanels:
 
     def _build_log_widget(self):
         group = QGroupBox("System Log")
-        group.setMinimumHeight(170)
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -202,12 +201,23 @@ class MeasurementPanels:
         alarm = data.get("ZUP", {}).get("alarm", "AL00000")
         if alarm and alarm != "AL00000":
             self.log(f"ZUP ALARM DETECTED: {alarm}")
+            
         row = {"datetime": datetime.now().isoformat(timespec="seconds"), "elapsed_s": time.time() - self.t0}
         for device_id, plugin in self.plugins.items():
             values = data.get(device_id, {})
             for column in plugin.columns:
                 row[column.label] = values.get(column.key, "")
-        self.rows.append(row)
+
+        # ========================================================
+        # [핵심 1] 카메라 패널에서 방금 찍힌 1D 픽셀 배열을 가져옵니다.
+        profile = self.get_rheed_profile() 
+        
+        # [핵심 2] DataLogger에 온도 데이터(row)와 픽셀 데이터(profile)를 "세트"로 넘깁니다!
+        # 기존 코드: self.rows.append(row)   <-- 이 줄을 지우고 아래 줄로 바꿉니다.
+        self.data_logger.append(row, rheed_profile=profile) 
+        # ========================================================
+
+        # (이하 화면의 그래프와 표를 업데이트하는 기존 코드는 동일하게 유지)
         self.times.append(row["elapsed_s"])
         self._append_table_row(row)
         for label in self.columns[2:]:
