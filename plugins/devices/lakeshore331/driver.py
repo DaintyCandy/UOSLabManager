@@ -21,6 +21,8 @@ class LakeShore331:
         return {
             "A_temp_K": self.read_temp("A") if self.enabled_inputs["A"] else "",
             "B_temp_K": self.read_temp("B") if self.enabled_inputs["B"] else "",
+            "A_temp_C": self.read_celsius("A") if self.enabled_inputs["A"] else "",
+            "B_temp_C": self.read_celsius("B") if self.enabled_inputs["B"] else "",
             "A_sensor": self.read_sensor("A") if self.enabled_inputs["A"] else "",
             "B_sensor": self.read_sensor("B") if self.enabled_inputs["B"] else "",
             "setpoint_K": self.get_setpoint(loop=1),
@@ -63,6 +65,21 @@ class LakeShore331:
     def read_sensor(self, channel: str = "A") -> float:
         channel = channel.upper()
         return float(self.query(f"SRDG? {channel}"))
+
+    def read_celsius(self, channel: str = "A") -> float:
+        channel = channel.upper()
+        if channel not in ("A", "B"):
+            raise ValueError("channel must be 'A' or 'B'")
+        return float(self.query(f"CRDG? {channel}"))
+
+    def read_input_value(self, channel: str, unit: int) -> float:
+        if unit == 1:
+            return self.read_temp(channel)
+        if unit == 2:
+            return self.read_celsius(channel)
+        if unit == 3:
+            return self.read_sensor(channel)
+        raise ValueError("reading unit must be 1 (K), 2 (C), or 3 (sensor units)")
 
     def get_setpoint(self, loop: int = 1) -> float:
         return float(self.query(f"SETP? {loop}"))
@@ -131,6 +148,22 @@ class LakeShore331:
 
     def is_ramping(self, loop: int = 1) -> bool:
         return bool(int(self.query(f"RAMPST? {loop}")))
+
+    def get_zone(self, loop: int, zone: int):
+        if loop not in (1, 2) or not 1 <= zone <= 10:
+            raise ValueError("loop must be 1 or 2 and zone must be 1 through 10")
+        top, p, i, d, manual, heater_range = self.query(f"ZONE? {loop},{zone}").split(",")
+        return float(top), float(p), float(i), float(d), float(manual), int(heater_range)
+
+    def set_zone(self, loop: int, zone: int, top: float, p: float, i: float,
+                 d: float, manual: float, heater_range: int):
+        if loop not in (1, 2) or not 1 <= zone <= 10:
+            raise ValueError("loop must be 1 or 2 and zone must be 1 through 10")
+        if top < 0 or not 0.1 <= p <= 1000 or not 0.1 <= i <= 1000:
+            raise ValueError("zone top/P/I value is out of range")
+        if not 0 <= d <= 200 or not 0 <= manual <= 100 or heater_range not in (0, 1, 2, 3):
+            raise ValueError("zone D/manual/range value is out of range")
+        self.write(f"ZONE {loop},{zone},{top},{p},{i},{d},{manual},{heater_range}")
 
     def input_status(self, channel: str = "A") -> int:
         channel = channel.upper()

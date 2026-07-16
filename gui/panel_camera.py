@@ -7,9 +7,11 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSplitter,
+    QMessageBox, QSizePolicy, QSplitter,
     QStackedLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
+
+from .widget_busy_spinner import BusySpinner
 
 try:
     import cv2
@@ -58,6 +60,7 @@ class CameraPanel(QWidget):
         self.last_frame_at = None
         self.last_recorded_at = None
         self.preview_fps = None
+        self.preview_active = False
         
         # --- [RHEED 1D 추출용 변수] ---
         self.latest_profile = None 
@@ -75,27 +78,20 @@ class CameraPanel(QWidget):
         self.source_input = QLineEdit(self.default_source)
         self.source_input.setFixedWidth(50)
         options.addWidget(self.source_input)
-        options.addWidget(QLabel("Preview:"))
-        preview_start = QPushButton("Start Preview")
-        preview_start.clicked.connect(self.start_preview)
-        options.addWidget(preview_start)
-        preview_stop = QPushButton("Stop Preview")
-        preview_stop.clicked.connect(self.stop_preview)
-        options.addWidget(preview_stop)
         options.addStretch()
-        options.addWidget(QLabel("Fixed FPS:"))
+        self.set_fps_checkbox = QCheckBox("Set FPS:")
+        self.set_fps_checkbox.setChecked(True)
+        self.set_fps_checkbox.setToolTip(
+            "Enable to record at the selected FPS. Disable to record every received frame."
+        )
+        self.set_fps_checkbox.toggled.connect(self.update_recording_mode_controls)
+        options.addWidget(self.set_fps_checkbox)
         self.fps_input = QDoubleSpinBox()
         self.fps_input.setRange(1.0, 60.0)
         self.fps_input.setDecimals(1)
         self.fps_input.setValue(30.0)
         self.fps_input.setToolTip("Lower values save fewer frames and reduce video file size.")
         options.addWidget(self.fps_input)
-        self.realtime_checkbox = QCheckBox("Real-time Recording")
-        self.realtime_checkbox.setToolTip(
-            "Record every camera frame. Fixed FPS selection is disabled in this mode."
-        )
-        self.realtime_checkbox.toggled.connect(self.update_recording_mode_controls)
-        options.addWidget(self.realtime_checkbox)
         self.frame_status_label = QLabel("Frame: -")
         options.addWidget(self.frame_status_label)
         self.recording_indicator = QLabel("● RECORDING")
@@ -132,49 +128,87 @@ class CameraPanel(QWidget):
         # ----------------------------------------
 
         # 3. 프리뷰 화면
-        self.preview = QLabel("No camera preview")
+        self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setStyleSheet("background:#000; color:#777; border:2px inset #555;")
+        self.set_standby_preview()
         self.preview_stack.addWidget(self.preview)
         self.loading_page = QWidget()
         self.loading_page.setStyleSheet("background:#000; color:#ddd; border:2px inset #555;")
         loading_layout = QVBoxLayout(self.loading_page)
         loading_layout.addStretch()
-        loading_text = QLabel("Loading camera…")
-        loading_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        loading_text.setStyleSheet("font-size:14pt; font-weight:bold;")
-        loading_layout.addWidget(loading_text)
-        self.loading_progress = QProgressBar()
-        self.loading_progress.setRange(0, 0)
-        self.loading_progress.setTextVisible(False)
-        self.loading_progress.setFixedWidth(240)
-        loading_layout.addWidget(self.loading_progress, alignment=Qt.AlignmentFlag.AlignCenter)
+        loading_layout.addWidget(BusySpinner(self.loading_page), alignment=Qt.AlignmentFlag.AlignCenter)
         loading_layout.addStretch()
         self.preview_stack.addWidget(self.loading_page)
         self.preview_stack.setCurrentWidget(self.preview)
         body.addWidget(self.preview_container, 1)
         recording_controls = QHBoxLayout()
         recording_controls.addStretch()
-        for icon, tooltip, callback in (
-            ("●", "Arm Recording", self.arm_recording),
-            ("▶", "Start / Resume Recording", self.start_recording),
-            ("⏸", "Pause Recording", self.pause_recording),
-            ("■", "Stop Recording", self.stop_recording),
-        ):
-            button = QToolButton()
-            button.setText(icon)
-            button.setToolTip(tooltip)
-            button.setFixedSize(42, 34)
-            button.setStyleSheet("font-size:16pt; font-weight:bold;")
-            button.clicked.connect(callback)
-            recording_controls.addWidget(button)
+        self.preview_switch = QToolButton()
+        self.preview_switch.setText("Preview OFF")
+        self.preview_switch.setCheckable(True)
+        self.preview_switch.setFixedSize(110, 34)
+        self.preview_switch.setStyleSheet(
+            "QToolButton { border:1px solid #777; border-radius:17px; font-weight:bold; }"
+            "QToolButton:checked { background:#2e7d32; color:white; border-color:#66bb6a; }"
+        )
+        self.preview_switch.toggled.connect(self.toggle_preview)
+        recording_controls.addWidget(self.preview_switch)
+
+        self.record_button = QToolButton()
+        self.record_button.setText("●")
+        self.record_button.setToolTip("Start Recording")
+        self.record_button.setFixedSize(42, 34)
+        self.record_button.setStyleSheet("font-size:16pt; font-weight:bold; color:#ef5350;")
+        self.record_button.clicked.connect(self.start_recording)
+        recording_controls.addWidget(self.record_button)
+
+        self.play_pause_button = QToolButton()
+        self.play_pause_button.setText("▶")
+        self.play_pause_button.setToolTip("Resume Recording")
+        self.play_pause_button.setFixedSize(42, 34)
+        self.play_pause_button.setStyleSheet("font-size:16pt; font-weight:bold;")
+        self.play_pause_button.setEnabled(False)
+        self.play_pause_button.clicked.connect(self.toggle_recording_pause)
+        recording_controls.addWidget(self.play_pause_button)
+
+        self.stop_record_button = QToolButton()
+        self.stop_record_button.setText("■")
+        self.stop_record_button.setToolTip("Stop Recording")
+        self.stop_record_button.setFixedSize(42, 34)
+        self.stop_record_button.setStyleSheet("font-size:16pt; font-weight:bold;")
+        self.stop_record_button.setEnabled(False)
+        self.stop_record_button.clicked.connect(self.stop_recording)
+        recording_controls.addWidget(self.stop_record_button)
         recording_controls.addStretch()
         body.addLayout(recording_controls)
         layout.addWidget(group, 1)
 
+    def set_standby_preview(self):
+        camera_number = self.title.rsplit(" ", 1)[-1]
+        self.preview.setText(
+            "<div style='text-align:center;'>"
+            f"<span style='font-size:84pt; font-weight:800; color:#555;'>{camera_number}</span>"
+            "<br><span style='font-size:14pt; color:#777;'>CAMERA STANDBY</span>"
+            "</div>"
+        )
+
     def update_recording_mode_controls(self, _checked=False):
-        fixed_fps_enabled = not self.realtime_checkbox.isChecked() and not self.recording_armed
-        self.fps_input.setEnabled(fixed_fps_enabled)
+        self.fps_input.setEnabled(self.set_fps_checkbox.isChecked() and not self.recording_armed)
+
+    def set_preview_switch(self, enabled):
+        self.preview_switch.blockSignals(True)
+        self.preview_switch.setChecked(enabled)
+        self.preview_switch.setText("Preview ON" if enabled else "Preview OFF")
+        self.preview_switch.blockSignals(False)
+
+    def toggle_preview(self, enabled):
+        self.preview_switch.setText("Preview ON" if enabled else "Preview OFF")
+        if enabled:
+            if not self.start_preview():
+                self.set_preview_switch(False)
+        else:
+            self.stop_preview()
 
     def source(self):
         value = self.source_input.text().strip()
@@ -185,6 +219,8 @@ class CameraPanel(QWidget):
             QMessageBox.critical(self, "Camera Error", "OpenCV is not installed.")
             return False
         if self.camera_worker is not None and self.camera_worker.isRunning():
+            self.preview_active = True
+            self.set_preview_switch(True)
             return True
         self.camera_worker = CameraWorker(self.source(), self)
         self.camera_worker.frame_ready.connect(self.update_frame)
@@ -192,11 +228,15 @@ class CameraPanel(QWidget):
         self.camera_worker.finished.connect(self.camera_worker_finished)
         self.preview_stack.setCurrentWidget(self.loading_page)
         self.preview_fps = None
+        self.preview_active = True
         self.camera_worker.start()
+        self.set_preview_switch(True)
         self.log(f"Camera preview started: {self.source()}")
         return True
 
     def stop_preview(self):
+        self.preview_active = False
+        self.set_preview_switch(False)
         self.stop_recording()
         if self.camera_worker is not None:
             worker = self.camera_worker
@@ -208,20 +248,34 @@ class CameraPanel(QWidget):
         self.frame_status_label.setText("Frame: -")
         self.latest_profile = None # 끄면 프로파일도 초기화
         self.preview.clear()
-        self.preview.setText("No camera preview")
+        self.set_standby_preview()
         self.preview_stack.setCurrentWidget(self.preview)
 
     def handle_camera_error(self, message):
         self.log(message)
+        self.preview_active = False
+        self.set_preview_switch(False)
         self.stop_recording()
         self.preview.clear()
-        self.preview.setText(message)
+        self.set_standby_preview()
         self.preview_stack.setCurrentWidget(self.preview)
 
     def camera_worker_finished(self):
         worker = self.sender()
+        was_active = self.preview_active
+        self.preview_active = False
         if self.camera_worker is worker:
             self.camera_worker = None
+        if self.preview_switch.isChecked() or was_active:
+            self.set_preview_switch(False)
+            self.stop_recording()
+            self.last_frame_at = None
+            self.preview_fps = None
+            self.frame_status_label.setText("Frame: -")
+            self.latest_profile = None
+            self.preview.clear()
+            self.set_standby_preview()
+            self.preview_stack.setCurrentWidget(self.preview)
 
     def arm_recording(self):
         if self.recording_armed:
@@ -237,7 +291,7 @@ class CameraPanel(QWidget):
         self.recording_paused = False
         self.last_recorded_at = None
         self.fps_input.setEnabled(False)
-        self.realtime_checkbox.setEnabled(False)
+        self.set_fps_checkbox.setEnabled(False)
         self.recording_indicator.setVisible(True)
         self.recording_indicator.setText("● ARMED")
         self.recording_indicator.setStyleSheet(
@@ -260,7 +314,18 @@ class CameraPanel(QWidget):
             "color:#ff3b30; background:rgba(120, 0, 0, 90); "
             "font-size:12pt; font-weight:900; padding:5px 10px; border-radius:5px;"
         )
+        self.record_button.setEnabled(False)
+        self.play_pause_button.setEnabled(True)
+        self.play_pause_button.setText("⏸")
+        self.play_pause_button.setToolTip("Pause Recording")
+        self.stop_record_button.setEnabled(True)
         self.log("Camera recording resumed" if was_paused else "Camera recording started")
+
+    def toggle_recording_pause(self):
+        if self.recording:
+            self.pause_recording()
+        elif self.recording_paused:
+            self.start_recording()
 
     def pause_recording(self):
         if not self.recording_armed or not self.recording:
@@ -272,6 +337,8 @@ class CameraPanel(QWidget):
             "color:#ffb74d; background:rgba(100, 60, 0, 100); "
             "font-size:12pt; font-weight:900; padding:5px 10px; border-radius:5px;"
         )
+        self.play_pause_button.setText("▶")
+        self.play_pause_button.setToolTip("Resume Recording")
         self.log("Camera recording paused")
 
     def stop_recording(self):
@@ -283,12 +350,19 @@ class CameraPanel(QWidget):
             self.recording = False
             self.recording_paused = False
             self.last_recorded_at = None
-            self.realtime_checkbox.setEnabled(True)
+            self.set_fps_checkbox.setEnabled(True)
             self.update_recording_mode_controls()
             self.recording_indicator.setVisible(False)
+            self.record_button.setEnabled(True)
+            self.play_pause_button.setText("▶")
+            self.play_pause_button.setToolTip("Resume Recording")
+            self.play_pause_button.setEnabled(False)
+            self.stop_record_button.setEnabled(False)
             self.log(f"Camera recording saved: {self.video_path}")
 
     def update_frame(self, frame):
+        if not self.preview_active:
+            return
         self.preview_stack.setCurrentWidget(self.preview)
         now = time.perf_counter()
         if self.last_frame_at is not None:
@@ -301,14 +375,14 @@ class CameraPanel(QWidget):
             self.frame_status_label.setText(f"Frame: {frame_ms:.1f} ms ({fps:.1f} FPS)")
         self.last_frame_at = now
         if self.recording:
-            if self.realtime_checkbox.isChecked():
-                self.write_frame(frame)
-                self.last_recorded_at = now
-            else:
+            if self.set_fps_checkbox.isChecked():
                 recording_interval = 1.0 / self.fps_input.value()
                 if self.last_recorded_at is None or now - self.last_recorded_at >= recording_interval:
                     self.write_frame(frame)
                     self.last_recorded_at = now
+            else:
+                self.write_frame(frame)
+                self.last_recorded_at = now
             
         # --- [추가] RHEED 1D 프로파일 추출 (Vertical Projection) ---
         height, width = frame.shape[:2]
@@ -347,9 +421,9 @@ class CameraPanel(QWidget):
             height, width = frame.shape[:2]
             codec = cv2.VideoWriter_fourcc(*"mp4v")
             output_fps = (
-                max(1.0, min(120.0, self.preview_fps or 30.0))
-                if self.realtime_checkbox.isChecked()
-                else self.fps_input.value()
+                self.fps_input.value()
+                if self.set_fps_checkbox.isChecked()
+                else max(1.0, min(120.0, self.preview_fps or 30.0))
             )
             self.writer = cv2.VideoWriter(self.video_path, codec, output_fps, (width, height))
             if not self.writer.isOpened():

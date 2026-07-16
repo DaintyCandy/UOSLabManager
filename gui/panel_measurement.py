@@ -1,9 +1,10 @@
+import os
 import time
 from datetime import datetime
 
 import pyqtgraph as pg
 from core.data_logger import DataLogger
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
     QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
@@ -50,6 +51,8 @@ class MeasurementPanels:
     def _build_graph_widget(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(4)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Data Graphs"))
         controls.addStretch()
@@ -57,7 +60,7 @@ class MeasurementPanels:
         self.split_graph_button.setText("◫")
         self.split_graph_button.setToolTip("Split graph view")
         self.split_graph_button.setCheckable(True)
-        self.split_graph_button.setFixedSize(36, 30)
+        self.split_graph_button.setFixedSize(32, 26)
         self.split_graph_button.setStyleSheet("font-size:17pt; font-weight:bold;")
         self.split_graph_button.toggled.connect(self.set_split_graph)
         controls.addWidget(self.split_graph_button)
@@ -83,8 +86,9 @@ class MeasurementPanels:
         pane = QWidget()
         pane_layout = QVBoxLayout(pane)
         pane_layout.setContentsMargins(0, 0, 0, 0)
+        pane_layout.setSpacing(4)
         selector = GraphSelectionTree(self.plugins)
-        selector.setMaximumHeight(80)
+        selector.setFixedHeight(58)
         selector.selection_changed.connect(self.apply_selection)
         pane_layout.addWidget(selector)
         graph_group = QGroupBox(f"Graph {number}")
@@ -250,7 +254,12 @@ class MeasurementPanels:
         if not self.rows:
             QMessageBox.information(self.table, "Save CSV", "No data to save.")
             return
-        path, _ = QFileDialog.getSaveFileName(self.table, "Save Data", "experiment_data.csv", "CSV Files (*.csv)")
+        settings = QSettings("UOSLabManager", "UOSLabManager")
+        default_directory = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        output_directory = settings.value("data/output_dir", default_directory)
+        os.makedirs(output_directory, exist_ok=True)
+        default_path = os.path.join(output_directory, "experiment_data.csv")
+        path, _ = QFileDialog.getSaveFileName(self.table, "Save Data", default_path, "CSV Files (*.csv)")
         if path:
             self.data_logger.save_csv(path, self.selected_columns())
             self.log(f"Saved selected CSV: {path}")
