@@ -1,5 +1,7 @@
 from PyQt6.QtCore import pyqtSignal
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel
+from PyQt6.QtWidgets import (
+    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QSizePolicy,
+)
 
 
 class GraphSelectionTree(QGroupBox):
@@ -16,6 +18,9 @@ class GraphSelectionTree(QGroupBox):
             for column in plugin.columns
         }
         layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 5)
+        layout.setSpacing(6)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout.addWidget(QLabel("Device"))
         self.device_combo = QComboBox()
         for device_id, plugin in plugins.items():

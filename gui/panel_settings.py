@@ -1,8 +1,12 @@
-from PyQt6.QtCore import QSettings
+import os
+
+from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
     QLineEdit, QPushButton, QVBoxLayout, QWidget,
 )
+
+from .widget_busy_spinner import BusySpinnerDialog
 
 
 class SettingsPanel(QWidget):
@@ -12,6 +16,7 @@ class SettingsPanel(QWidget):
         self.theme_changed = theme_changed
         self.camera_workspace = camera_workspace
         self.settings = QSettings("UOSLabManager", "UOSLabManager")
+        self.theme_spinner = None
         layout = QVBoxLayout(self)
         appearance = QGroupBox("Appearance")
         form = QFormLayout(appearance)
@@ -35,13 +40,41 @@ class SettingsPanel(QWidget):
         path_row.addWidget(choose_path)
         camera_form.addRow("Recording Path", path_row)
         layout.addWidget(camera)
+        data = QGroupBox("Data Table Storage")
+        data_form = QFormLayout(data)
+        data_path_row = QHBoxLayout()
+        default_data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        self.data_path = QLineEdit(self.settings.value("data/output_dir", default_data_path))
+        self.data_path.setReadOnly(True)
+        data_path_row.addWidget(self.data_path)
+        choose_data_path = QPushButton("Choose")
+        choose_data_path.clicked.connect(self.choose_data_path)
+        data_path_row.addWidget(choose_data_path)
+        data_form.addRow("CSV Save Path", data_path_row)
+        layout.addWidget(data)
         layout.addStretch()
 
     def change_theme(self, display_name):
-        theme = self.theme_manager.THEMES[display_name]
-        self.theme_manager.apply(theme)
-        if self.theme_changed:
-            self.theme_changed(theme)
+        if self.theme_spinner is not None:
+            return
+        self.pending_theme_name = display_name
+        self.theme_combo.setEnabled(False)
+        self.theme_spinner = BusySpinnerDialog(self)
+        self.theme_spinner.show()
+        QTimer.singleShot(80, self.apply_pending_theme)
+
+    def apply_pending_theme(self):
+        try:
+            theme = self.theme_manager.THEMES[self.pending_theme_name]
+            self.theme_manager.apply(theme)
+            if self.theme_changed:
+                self.theme_changed(theme)
+        finally:
+            if self.theme_spinner is not None:
+                self.theme_spinner.close()
+                self.theme_spinner.deleteLater()
+                self.theme_spinner = None
+            self.theme_combo.setEnabled(True)
 
     def choose_camera_path(self):
         path = QFileDialog.getExistingDirectory(self, "Choose Camera Save Folder", self.camera_path.text())
@@ -51,3 +84,10 @@ class SettingsPanel(QWidget):
         self.settings.setValue("camera/output_dir", path)
         if self.camera_workspace is not None:
             self.camera_workspace.set_output_dir(path)
+
+    def choose_data_path(self):
+        path = QFileDialog.getExistingDirectory(self, "Choose Data Table Save Folder", self.data_path.text())
+        if not path:
+            return
+        self.data_path.setText(path)
+        self.settings.setValue("data/output_dir", path)
