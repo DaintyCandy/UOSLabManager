@@ -109,11 +109,14 @@ class DeviceManager:
         self.disconnect_errors = {}
         self.lock = threading.RLock()
 
-    def add_device(self, name: str, device_or_factory):
+    def add_device(self, name: str, device_or_factory, interval=1.0):
         with self.lock:
             if name in self.devices:
                 raise ValueError(f"{name} already exists")
-            worker = DeviceWorker(name, device_or_factory, self._updated, self._failed)
+            worker = DeviceWorker(
+                name, device_or_factory, self._updated, self._failed,
+                interval=max(0.001, float(interval)),
+            )
             self.workers[name] = worker
             self.devices[name] = DeviceProxy(worker)
             self.telemetry[name] = {"response_ms": None, "updated_at": None}
@@ -176,6 +179,7 @@ class DeviceManager:
                 "connected": connected,
                 "realtime": bool(connected and updated_at is not None and time.monotonic() - updated_at < 2.5),
                 "response_ms": telemetry.get("response_ms"),
+                "updated_at": updated_at,
                 "age_ms": None if updated_at is None else (time.monotonic() - updated_at) * 1000.0,
                 "error": self.disconnect_errors.get(name, ""),
             }

@@ -205,6 +205,8 @@ class MainWindow(QMainWindow):
             if opened_container is container:
                 panel = self.device_tabs.pop(device_id)
                 del self.device_tab_containers[device_id]
+                if hasattr(panel, "shutdown"):
+                    panel.shutdown()
                 panel.deleteLater()
                 container.deleteLater()
                 break
@@ -243,6 +245,9 @@ class MainWindow(QMainWindow):
         if self.sequence_panel.is_running:
             self.sequence_panel.finish_seq("Emergency stop activated.")
         self.camera_panel.stop_preview()
+        for panel in self.device_tabs.values():
+            if hasattr(panel, "stop_video"):
+                panel.stop_video()
         for device_id, stop_method in (
             ("LS331", "heater_off"), ("K2400", "output_off"), ("ZUP", "output_off")
         ):
@@ -259,6 +264,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.save_window_layout()
         self.camera_panel.stop_preview()
+        for panel in self.device_tabs.values():
+            if hasattr(panel, "shutdown"):
+                panel.shutdown()
         self.disconnect_all()
         event.accept()
 
