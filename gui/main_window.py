@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
 )
 
-from core import DeviceManager, load_device_plugins
+from core import DeviceManager, load_device_plugins, load_experiment_plugins
 from .panel_dashboard import DashboardPanel
 from .panel_camera import CameraWorkspace
 from .panel_measurement import MeasurementPanels
@@ -29,8 +29,11 @@ class MainWindow(QMainWindow):
         self.window_settings = QSettings("UOSLabManager", "UOSLabManager")
         self.manager = DeviceManager()
         self.plugins = load_device_plugins()
+        self.experiment_plugins = load_experiment_plugins()
         self.device_tabs = {}
         self.device_tab_containers = {}
+        self.experiment_tabs = {}
+        self.experiment_tab_containers = {}
         self.settings_panel = None
         self._build_ui()
 
@@ -56,8 +59,8 @@ class MainWindow(QMainWindow):
         self.measurement.get_rheed_profile = self.camera_panel.get_latest_profile
 
         self.dashboard = DashboardPanel(
-            self.manager, self.plugins, self.measurement, self.open_device_tab,
-            self.emergency_stop,
+            self.manager, self.plugins, self.experiment_plugins,
+            self.open_device_tab, self.open_experiment,
         )
 
         self.tabs = QTabWidget()
@@ -65,6 +68,7 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(False)
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self.update_active_experiment)
         self.tabs.addTab(self.data_workspace, "Data")
         self.tabs.addTab(self.sequence_workspace, "Sequence")
         self.tabs.addTab(self.camera_panel, "Camera")
@@ -192,6 +196,43 @@ class MainWindow(QMainWindow):
             panel.sync_connection_status()
         self.tabs.setCurrentIndex(index)
 
+    def open_experiment(self, experiment_id):
+        plugin = self.experiment_plugins[experiment_id]
+        if plugin.panel_factory is not None:
+            panel = self.experiment_tabs.get(experiment_id)
+            if panel is None:
+                panel = plugin.panel_factory(self.manager, self)
+                self.experiment_tabs[experiment_id] = panel
+                container = QScrollArea()
+                container.setWidgetResizable(True)
+                container.setWidget(panel)
+                self.experiment_tab_containers[experiment_id] = container
+                index = self.tabs.addTab(container, plugin.display_name)
+            else:
+                index = self.tabs.indexOf(
+                    self.experiment_tab_containers[experiment_id]
+                )
+            if hasattr(panel, "sync_connection_status"):
+                panel.sync_connection_status()
+            self.tabs.setCurrentIndex(index)
+            return
+        if self.sequence_panel.load_experiment(plugin):
+            self.tabs.setCurrentWidget(self.sequence_workspace)
+
+    def update_active_experiment(self, _index=None):
+        if not hasattr(self, "dashboard") or not hasattr(self, "tabs"):
+            return
+        current = self.tabs.currentWidget()
+        active_id = next(
+            (
+                experiment_id
+                for experiment_id, container in self.experiment_tab_containers.items()
+                if container is current
+            ),
+            None,
+        )
+        self.dashboard.set_active_experiment(active_id)
+
     def close_tab(self, index):
         if index < 3:
             return
@@ -209,7 +250,16 @@ class MainWindow(QMainWindow):
                     panel.shutdown()
                 panel.deleteLater()
                 container.deleteLater()
-                break
+                return
+        for experiment_id, opened_container in list(self.experiment_tab_containers.items()):
+            if opened_container is container:
+                panel = self.experiment_tabs.pop(experiment_id)
+                del self.experiment_tab_containers[experiment_id]
+                if hasattr(panel, "shutdown"):
+                    panel.shutdown()
+                panel.deleteLater()
+                container.deleteLater()
+                return
 
     def log(self, message):
         if hasattr(self.measurement, "log_box"):
@@ -227,6 +277,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "dashboard"):
             self.dashboard.refresh_devices()
         for panel in self.device_tabs.values():
+            if hasattr(panel, "sync_connection_status"):
+                panel.sync_connection_status()
+        for panel in self.experiment_tabs.values():
             if hasattr(panel, "sync_connection_status"):
                 panel.sync_connection_status()
         if self.manager.devices:
@@ -248,6 +301,9 @@ class MainWindow(QMainWindow):
         for panel in self.device_tabs.values():
             if hasattr(panel, "stop_video"):
                 panel.stop_video()
+        for panel in self.experiment_tabs.values():
+            if hasattr(panel, "emergency_stop"):
+                panel.emergency_stop()
         for device_id, stop_method in (
             ("LS331", "heater_off"), ("K2400", "output_off"), ("ZUP", "output_off")
         ):
@@ -262,9 +318,16 @@ class MainWindow(QMainWindow):
         self.log("EMERGENCY STOP ACTIVATED")
 
     def closeEvent(self, event):
+        self.clock_timer.stop()
+        self.measurement.timer.stop()
+        self.sequence_panel.engine_timer.stop()
+        self.dashboard.refresh_timer.stop()
         self.save_window_layout()
         self.camera_panel.stop_preview()
         for panel in self.device_tabs.values():
+            if hasattr(panel, "shutdown"):
+                panel.shutdown()
+        for panel in self.experiment_tabs.values():
             if hasattr(panel, "shutdown"):
                 panel.shutdown()
         self.disconnect_all()

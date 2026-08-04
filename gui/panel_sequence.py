@@ -254,6 +254,37 @@ class SequencePanel(QWidget):
         self.recipe_label.setText(self.recipe_path.stem)
         self.log(f"Recipe saved: {self.recipe_path}")
 
+    def load_experiment(self, plugin):
+        """Create an editable sequence recipe from an experiment plug-in."""
+        if self.is_running:
+            QMessageBox.warning(
+                self, "Experiment", "Stop the sequence before loading an experiment."
+            )
+            return False
+        if self.recipe_dirty and self.list_widget.count():
+            answer = QMessageBox.question(
+                self, "Load Experiment", "Discard unsaved recipe changes?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        try:
+            steps = self.validate_recipe({
+                "schema_version": 1,
+                "steps": plugin.create_recipe(),
+            })
+        except (ValueError, TypeError) as error:
+            QMessageBox.critical(self, "Invalid Experiment", str(error))
+            return False
+        self.list_widget.clear()
+        for step in steps:
+            self.add_recipe_item(step)
+        self.recipe_path = None
+        self.recipe_dirty = True
+        self.recipe_label.setText(f"{plugin.display_name} *")
+        self.log(f"Experiment loaded: {plugin.display_name}")
+        return True
+
     def load_recipe(self):
         if self.is_running:
             QMessageBox.warning(self, "Recipe", "Stop the sequence before loading a recipe.")

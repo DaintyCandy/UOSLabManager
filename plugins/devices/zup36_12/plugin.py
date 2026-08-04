@@ -11,7 +11,7 @@ class ZUP3612Plugin(DevicePlugin):
     display_name = "ZUP36-12"
     order = 30
     connection_label = "Port"
-    default_connection = "/dev/cu.usbserial-A9EQ7W68"
+    default_connection = "COM4"
     columns = (
         DataColumn("voltage_V", "ZUP_voltage_V"),
         DataColumn("current_A", "ZUP_current_A"),

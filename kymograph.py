@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 1. 데이터 불러오기
-data = np.load("test_rheed.npy") #파일 경로를 입력하셔야 됩니다 예:/Users/leetaehan/Downloads/test_rheed.npy
+data = np.load(r"C:\Users\goodd\Downloads\experiment_data_rheed.npy") #파일 경로를 입력하셔야 됩니다 예:/Users/leetaehan/Downloads/test_rheed.npy
 
 # 2. 히트맵(Heatmap) 그리기
 plt.figure(figsize=(10, 6))

@@ -5,9 +5,10 @@ from pathlib import Path
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
-    QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
-    QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QSizePolicy, QSpinBox, QTabWidget, QTextEdit, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from .driver import ZUP36_12
@@ -20,7 +21,10 @@ class ZUP3612Panel(QWidget):
         self.plugin = plugin
         self.main_window = parent
         self.snapshot = None
+        self.last_disconnect_error = ""
         self.ramp_state = None
+        self.read_after_ramp = False
+        self.applied_protection = None
         self.ramp_timer = QTimer(self)
         self.ramp_timer.setInterval(200)
         self.ramp_timer.timeout.connect(self.advance_output_ramp)
@@ -39,6 +43,7 @@ class ZUP3612Panel(QWidget):
         tabs = QTabWidget()
         tabs.addTab(self._build_output_protection_tab(), "Output & Protection")
         tabs.addTab(self._build_safety_tab(), "Safety")
+        tabs.addTab(self._build_connection_tab(), "Connection")
         root.addWidget(tabs, 1)
 
         buttons = QHBoxLayout()
@@ -56,7 +61,7 @@ class ZUP3612Panel(QWidget):
     def _build_monitor(self):
         group = QGroupBox("ZUP 36-12")
         layout = QGridLayout(group)
-        self.port_input = QLineEdit("COM3")
+        self.port_input = QLineEdit("COM4")
         self.port_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.status_label = QLabel("● Disconnected")
         self.status_label.setStyleSheet("color:#e74c3c; font-weight:bold;")
@@ -77,7 +82,7 @@ class ZUP3612Panel(QWidget):
         layout.addWidget(self.connection_button, 0, 6)
         self.monitor_labels = {}
         items = (
-            ("set_output", "Set Voltage / Current"),
+            ("set_output", "Applied Settings"),
             ("actual_output", "Actual Voltage / Current"),
             ("ramp", "Voltage / Current Ramp"),
             ("state", "Power / CV-CC / Output"),
@@ -97,6 +102,7 @@ class ZUP3612Panel(QWidget):
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.document().setMaximumBlockCount(2000)
         self.log_box.setMinimumHeight(190)
         self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
         layout.addWidget(self.log_box)
@@ -126,6 +132,7 @@ class ZUP3612Panel(QWidget):
         protection_group = QGroupBox("Protection")
         protection_form = QFormLayout(protection_group)
         self.ovp_limit = self._spin(39.6, 38, 1)
+        self.ovp_limit.setMinimum(1.8)
         self.uvp_limit = self._spin(35.9, 0, 1)
         self.foldback_enabled = QCheckBox("Foldback armed")
         self.auto_restart = QCheckBox("Auto restart")
@@ -150,20 +157,10 @@ class ZUP3612Panel(QWidget):
         ramp_form.addRow("Current Ramp", self.current_ramp_enabled)
         ramp_form.addRow("Current Rate [A/s]", self.current_ramp_rate)
 
-        for widget in (self.voltage_setpoint, self.current_limit):
-            widget.valueChanged.connect(self.update_summary_settings)
-        for widget in (
-            self.voltage_ramp_enabled, self.current_ramp_enabled,
-            self.voltage_ramp_rate, self.current_ramp_rate,
-        ):
-            signal = widget.toggled if isinstance(widget, QCheckBox) else widget.valueChanged
-            signal.connect(self.update_summary_settings)
-
         for group in (output_group, protection_group, ramp_group):
             group.setMinimumWidth(0)
             group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             layout.addWidget(group, 1)
-        self.update_summary_settings()
         return panel
 
     def _build_safety_tab(self):
@@ -183,6 +180,75 @@ class ZUP3612Panel(QWidget):
         form.addRow("Fault interlock", self.block_output_on_fault)
         return panel
 
+    def _build_connection_tab(self):
+        panel = QWidget()
+        form = QFormLayout(panel)
+        self.baud_rate = QComboBox()
+        for value in (1200, 2400, 4800, 9600, 19200, 38400):
+            self.baud_rate.addItem(str(value), value)
+        self.baud_rate.setCurrentIndex(self.baud_rate.findData(9600))
+
+        self.data_bits = QComboBox()
+        self.data_bits.addItem("7 bits", 7)
+        self.data_bits.addItem("8 bits", 8)
+        self.data_bits.setCurrentIndex(self.data_bits.findData(8))
+
+        self.parity = QComboBox()
+        for label, value in (("None", "N"), ("Even", "E"), ("Odd", "O")):
+            self.parity.addItem(label, value)
+
+        self.stop_bits = QComboBox()
+        for label, value in (("1 bit", 1.0), ("1.5 bits", 1.5), ("2 bits", 2.0)):
+            self.stop_bits.addItem(label, value)
+
+        self.character_delay_ms = QDoubleSpinBox()
+        self.character_delay_ms.setRange(0.0, 100.0)
+        self.character_delay_ms.setDecimals(3)
+        self.character_delay_ms.setSingleStep(0.5)
+        self.character_delay_ms.setValue(10.0)
+        self.character_delay_ms.setSuffix(" ms/character")
+
+        self.command_delay_ms = QDoubleSpinBox()
+        self.command_delay_ms.setRange(0.0, 1000.0)
+        self.command_delay_ms.setDecimals(1)
+        self.command_delay_ms.setSingleStep(10.0)
+        self.command_delay_ms.setValue(50.0)
+        self.command_delay_ms.setSuffix(" ms/command")
+
+        self.serial_timeout = QDoubleSpinBox()
+        self.serial_timeout.setRange(0.1, 30.0)
+        self.serial_timeout.setDecimals(1)
+        self.serial_timeout.setValue(2.0)
+        self.serial_timeout.setSuffix(" s")
+
+        self.write_timeout = QDoubleSpinBox()
+        self.write_timeout.setRange(0.1, 30.0)
+        self.write_timeout.setDecimals(1)
+        self.write_timeout.setValue(2.0)
+        self.write_timeout.setSuffix(" s")
+
+        self.device_address = QSpinBox()
+        self.device_address.setRange(0, 31)
+        self.device_address.setValue(1)
+
+        self.connection_controls = (
+            self.baud_rate, self.data_bits, self.parity, self.stop_bits,
+            self.character_delay_ms, self.command_delay_ms, self.serial_timeout,
+            self.write_timeout, self.device_address,
+        )
+        form.addRow("Baud rate", self.baud_rate)
+        form.addRow("Data bits", self.data_bits)
+        form.addRow("Parity", self.parity)
+        form.addRow("Stop bits", self.stop_bits)
+        form.addRow("Character interval", self.character_delay_ms)
+        form.addRow("Command interval", self.command_delay_ms)
+        form.addRow("Read timeout", self.serial_timeout)
+        form.addRow("Write timeout", self.write_timeout)
+        form.addRow("Device address", self.device_address)
+        form.addRow("Flow control", QLabel("XON/XOFF enabled; RTS/CTS and DSR/DTR disabled"))
+        form.addRow("Command framing", QLabel(":ADRnn; + command, character-by-character, no CR/LF"))
+        return panel
+
     def get_device(self):
         return self.manager.get_device("ZUP")
 
@@ -197,17 +263,58 @@ class ZUP3612Panel(QWidget):
             return
         try:
             port = self.port_input.text().strip()
-            self.manager.add_device("ZUP", lambda: ZUP36_12(port))
-            self.log("Connected")
+            self.last_disconnect_error = ""
+            self.applied_protection = None
+            settings = self.connection_settings()
+            connection_info = {}
+
+            def create_device():
+                device = ZUP36_12(port, **settings)
+                connection_info["model"] = device.get_model()
+                connection_info["identification_error"] = device.get_identification_error()
+                return device
+
+            self.manager.add_device(
+                "ZUP", create_device
+            )
+            model = connection_info.get("model", "Unknown")
+            self.log(
+                f"Connected: {model} | {port}, {settings['baudrate']} baud, "
+                f"{settings['bytesize']}-{settings['parity']}-{settings['stopbits']:g}, "
+                f"{self.character_delay_ms.value():g} ms/character, "
+                f"{self.command_delay_ms.value():g} ms/command"
+            )
+            identification_error = connection_info.get("identification_error")
+            if identification_error:
+                self.log(
+                    f"Model query warning: {identification_error}; "
+                    "continuing with status polling"
+                )
             self.monitor_timer.start()
             self._notify_main()
             self.read_device()
         except Exception as error:
+            if self.get_device() is not None:
+                self.manager.remove_device("ZUP")
             self.show_error(error)
+
+    def connection_settings(self):
+        return {
+            "baudrate": self.baud_rate.currentData(),
+            "bytesize": self.data_bits.currentData(),
+            "parity": self.parity.currentData(),
+            "stopbits": self.stop_bits.currentData(),
+            "timeout": self.serial_timeout.value(),
+            "write_timeout": self.write_timeout.value(),
+            "character_delay": self.character_delay_ms.value() / 1000.0,
+            "command_delay": self.command_delay_ms.value() / 1000.0,
+            "address": self.device_address.value(),
+        }
 
     def disconnect_device(self):
         self.ramp_timer.stop()
         self.ramp_state = None
+        self.read_after_ramp = False
         device = self.get_device()
         if device and self.output_off_disconnect.isChecked():
             device.output_off()
@@ -220,6 +327,10 @@ class ZUP3612Panel(QWidget):
         device = self.get_device()
         if device is None:
             self.monitor_timer.stop()
+            error = self.manager.get_metrics("ZUP").get("error")
+            if error and error != self.last_disconnect_error:
+                self.last_disconnect_error = error
+                self.log(f"Connection lost: {error}")
             self.sync_connection_status()
             return
         try:
@@ -238,13 +349,11 @@ class ZUP3612Panel(QWidget):
             self.monitor_labels["faults"].setText(", ".join(faults) if faults else "OK")
             communication = state["programming_error_raw"] if state["communication_error"] else "OK"
             self.monitor_labels["communication"].setText(communication)
-            self.update_summary_settings()
             if self.block_output_on_fault.isChecked() and faults and state["output_on"]:
                 self.ramp_timer.stop()
                 self.ramp_state = None
                 device.output_off()
                 self.log(f"Safety interlock: output disabled ({', '.join(faults)})")
-                self.update_summary_settings()
             self.update_realtime_status()
         except Exception as error:
             self.monitor_labels["communication"].setText(str(error))
@@ -255,23 +364,24 @@ class ZUP3612Panel(QWidget):
             if self.main_window:
                 self.main_window.update_device_status()
 
-    def read_device(self):
+    def _load_device_settings(self):
         device = self.get_device()
         if device is None:
-            self.show_error("Connect the device first.")
-            return
+            raise RuntimeError("Connect the device first.")
+        values = device.read_settings()
+        self.voltage_setpoint.setValue(values["voltage"])
+        self.current_limit.setValue(values["current"])
+        self.foldback_enabled.setChecked(values["foldback"])
+        self.auto_restart.setChecked(values["auto_restart"])
+        self.output_enabled.setChecked(values["output"])
+        self.snapshot = deepcopy(self.profile_data())
+        self.update_summary_settings()
+        self.refresh_monitoring()
+        return values
+
+    def read_device(self):
         try:
-            values = device.read_settings()
-            self.voltage_setpoint.setValue(values["voltage"])
-            self.current_limit.setValue(values["current"])
-            self.ovp_limit.setValue(values["ovp"])
-            self.uvp_limit.setValue(values["uvp"])
-            self.foldback_enabled.setChecked(values["foldback"])
-            self.auto_restart.setChecked(values["auto_restart"])
-            self.output_enabled.setChecked(values["output"])
-            self.snapshot = deepcopy(self.profile_data())
-            self.update_summary_settings()
-            self.refresh_monitoring()
+            self._load_device_settings()
             self.log("Device settings read")
         except Exception as error:
             self.show_error(error)
@@ -289,22 +399,23 @@ class ZUP3612Panel(QWidget):
         try:
             self.ramp_timer.stop()
             self.ramp_state = None
-            current_settings = device.read_settings()
+            self.read_after_ramp = False
+            device.output_off()
             device.set_ovp(self.ovp_limit.value())
             device.set_uvp(self.uvp_limit.value())
             device.set_foldback(self.foldback_enabled.isChecked())
             device.set_auto_restart(self.auto_restart.isChecked())
             ramp_voltage = self.output_enabled.isChecked() and self.voltage_ramp_enabled.isChecked()
             ramp_current = self.output_enabled.isChecked() and self.current_ramp_enabled.isChecked()
-            start_voltage = current_settings["voltage"] if current_settings["output"] else 0.0
-            start_current = current_settings["current"] if current_settings["output"] else 0.0
+            start_voltage = 0.0 if ramp_voltage else voltage
+            start_current = 0.0 if ramp_current else current
             if not ramp_voltage:
                 device.set_voltage(voltage)
-            elif not current_settings["output"]:
+            else:
                 device.set_voltage(start_voltage)
             if not ramp_current:
                 device.set_current(current)
-            elif not current_settings["output"]:
+            else:
                 device.set_current(start_current)
             if self.output_enabled.isChecked():
                 device.output_on()
@@ -313,16 +424,41 @@ class ZUP3612Panel(QWidget):
                         start_voltage, start_current,
                         voltage, current, ramp_voltage, ramp_current,
                     )
+                    self.read_after_ramp = True
+            self.applied_protection = (
+                self.ovp_limit.value(), self.uvp_limit.value()
+            )
+            if self.ramp_state is None:
+                values = self._load_device_settings()
+                self.log(
+                    "Settings applied and read back: "
+                    f"{values['voltage']:.2f} V, {values['current']:.3f} A"
+                )
             else:
-                device.output_off()
-                device.set_voltage(voltage)
-                device.set_current(current)
-            self.snapshot = deepcopy(self.profile_data())
-            self.refresh_monitoring()
-            self.update_summary_settings()
-            self.log("Settings applied")
+                self.snapshot = deepcopy(self.profile_data())
+                self.refresh_monitoring()
+                self.log("Settings applied; readback will run after the ramp")
         except Exception as error:
+            self.read_after_ramp = False
+            reset_errors = self._safe_zero_output(device)
+            if reset_errors:
+                self.log(f"Apply safety-reset warning: {'; '.join(reset_errors)}")
             self.show_error(error)
+
+    @staticmethod
+    def _safe_zero_output(device):
+        errors = []
+        for method, value in (
+            ("output_off", None), ("set_voltage", 0.0), ("set_current", 0.0),
+        ):
+            try:
+                if value is None:
+                    getattr(device, method)()
+                else:
+                    getattr(device, method)(value)
+            except Exception as error:
+                errors.append(f"{method}: {error}")
+        return errors
 
     def clear_faults(self):
         if self.get_device() is None:
@@ -344,7 +480,6 @@ class ZUP3612Panel(QWidget):
             "updated_at": time.monotonic(),
         }
         self.ramp_timer.start()
-        self.update_summary_settings()
         self.log("Output ramp started")
 
     @staticmethod
@@ -358,6 +493,7 @@ class ZUP3612Panel(QWidget):
         if device is None or self.ramp_state is None:
             self.ramp_timer.stop()
             self.ramp_state = None
+            self.read_after_ramp = False
             return
         state = self.ramp_state
         now = time.monotonic()
@@ -379,6 +515,7 @@ class ZUP3612Panel(QWidget):
         except Exception as error:
             self.ramp_timer.stop()
             self.ramp_state = None
+            self.read_after_ramp = False
             self.show_error(error)
             return
         voltage_done = not state["ramp_voltage"] or state["voltage"] == state["target_voltage"]
@@ -387,13 +524,27 @@ class ZUP3612Panel(QWidget):
             self.ramp_timer.stop()
             self.ramp_state = None
             self.log("Output ramp completed")
-        self.update_summary_settings()
+            if self.read_after_ramp:
+                self.read_after_ramp = False
+                try:
+                    values = self._load_device_settings()
+                    self.log(
+                        "Ramp settings read back: "
+                        f"{values['voltage']:.2f} V, {values['current']:.3f} A"
+                    )
+                except Exception as error:
+                    self.show_error(f"Ramp completed, but readback failed: {error}")
 
     def update_summary_settings(self, _value=None):
         if not hasattr(self, "monitor_labels") or not hasattr(self, "voltage_setpoint"):
             return
+        protection = "OVP -  |  UVP -"
+        if self.applied_protection is not None:
+            ovp, uvp = self.applied_protection
+            protection = f"OVP {ovp:.1f} V  |  UVP {uvp:.1f} V"
         self.monitor_labels["set_output"].setText(
-            f"{self.voltage_setpoint.value():.3f} V  |  {self.current_limit.value():.3f} A"
+            f"{self.voltage_setpoint.value():.2f} V  |  "
+            f"{self.current_limit.value():.3f} A  |  {protection}"
         )
         voltage_text = (
             f"ON ({self.voltage_ramp_rate.value():g} V/s)"
@@ -419,6 +570,17 @@ class ZUP3612Panel(QWidget):
                 "current_enabled": self.current_ramp_enabled.isChecked(),
                 "current_rate": self.current_ramp_rate.value(),
             },
+            "connection": {
+                "baudrate": self.baud_rate.currentData(),
+                "bytesize": self.data_bits.currentData(),
+                "parity": self.parity.currentData(),
+                "stopbits": self.stop_bits.currentData(),
+                "character_delay_ms": self.character_delay_ms.value(),
+                "command_delay_ms": self.command_delay_ms.value(),
+                "timeout_s": self.serial_timeout.value(),
+                "write_timeout_s": self.write_timeout.value(),
+                "address": self.device_address.value(),
+            },
             "safety": {"max_voltage": self.max_voltage.value(), "max_current": self.max_current.value(), "max_power": self.max_power.value(), "off_disconnect": self.output_off_disconnect.isChecked(), "block_on_fault": self.block_output_on_fault.isChecked()},
         }
 
@@ -433,9 +595,23 @@ class ZUP3612Panel(QWidget):
         self.voltage_ramp_rate.setValue(ramp.get("voltage_rate", 1.0))
         self.current_ramp_enabled.setChecked(ramp.get("current_enabled", False))
         self.current_ramp_rate.setValue(ramp.get("current_rate", 0.5))
+        connection = data.get("connection", {})
+        for combo, value in (
+            (self.baud_rate, connection.get("baudrate", 9600)),
+            (self.data_bits, connection.get("bytesize", 8)),
+            (self.parity, connection.get("parity", "N")),
+            (self.stop_bits, connection.get("stopbits", 1.0)),
+        ):
+            index = combo.findData(value)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+        self.character_delay_ms.setValue(connection.get("character_delay_ms", 10.0))
+        self.command_delay_ms.setValue(connection.get("command_delay_ms", 50.0))
+        self.serial_timeout.setValue(connection.get("timeout_s", 2.0))
+        self.write_timeout.setValue(connection.get("write_timeout_s", 2.0))
+        self.device_address.setValue(connection.get("address", 1))
         safety = data.get("safety", {})
         self.max_voltage.setValue(safety.get("max_voltage", 36)); self.max_current.setValue(safety.get("max_current", 12)); self.max_power.setValue(safety.get("max_power", 432)); self.output_off_disconnect.setChecked(safety.get("off_disconnect", True)); self.block_output_on_fault.setChecked(safety.get("block_on_fault", True))
-        self.update_summary_settings()
 
     def revert(self):
         if self.snapshot is None:
@@ -464,6 +640,8 @@ class ZUP3612Panel(QWidget):
             f"QPushButton:hover {{ background:{hover}; }}"
         )
         self.port_input.setEnabled(not connected)
+        for control in self.connection_controls:
+            control.setEnabled(not connected)
         if connected and not self.monitor_timer.isActive():
             self.monitor_timer.start()
         elif not connected:

@@ -23,6 +23,7 @@ class DeviceWorker(threading.Thread):
         self.failure_callback = failure_callback
         self.interval = interval
         self.commands = queue.Queue()
+        self.stop_sentinel = object()
         self.stop_event = threading.Event()
         self.ready = threading.Event()
         self.startup_error = None
@@ -44,6 +45,15 @@ class DeviceWorker(threading.Thread):
                     command = self.commands.get(timeout=timeout)
                 except queue.Empty:
                     command = None
+                if command is self.stop_sentinel:
+                    break
+                if self.stop_event.is_set():
+                    if command is not None:
+                        self._fail_command(
+                            command,
+                            RuntimeError(f"{self.device_name} is disconnected"),
+                        )
+                    break
                 if command is not None:
                     self._execute(command)
                     continue
@@ -78,11 +88,21 @@ class DeviceWorker(threading.Thread):
     def _fail_pending(self, error):
         while True:
             try:
-                _, _, _, completed, result = self.commands.get_nowait()
+                command = self.commands.get_nowait()
             except queue.Empty:
                 return
-            result["error"] = error
-            completed.set()
+            if command is self.stop_sentinel or command is None:
+                continue
+            self._fail_command(command, error)
+
+    @staticmethod
+    def _fail_command(command, error):
+        try:
+            _, _, _, completed, result = command
+        except (TypeError, ValueError):
+            return
+        result["error"] = error
+        completed.set()
 
     def call(self, method_name, *args, **kwargs):
         if self.stop_event.is_set() or not self.is_alive():
@@ -97,7 +117,10 @@ class DeviceWorker(threading.Thread):
         return result.get("value")
 
     def stop(self):
+        if self.stop_event.is_set():
+            return
         self.stop_event.set()
+        self.commands.put(self.stop_sentinel)
 
 
 class DeviceManager:
@@ -161,6 +184,8 @@ class DeviceManager:
             self.telemetry.pop(name, None)
         if worker is not None:
             worker.stop()
+            if worker is not threading.current_thread():
+                worker.join(timeout=2.0)
 
     def get_device(self, name: str):
         with self.lock:
@@ -200,3 +225,6 @@ class DeviceManager:
             self.telemetry.clear()
         for worker in workers:
             worker.stop()
+        for worker in workers:
+            if worker is not threading.current_thread():
+                worker.join(timeout=2.0)
