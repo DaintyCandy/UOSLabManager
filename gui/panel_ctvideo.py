@@ -93,15 +93,21 @@ class CTVideoWorker(QThread):
             capture.release()
             return
         try:
-            from plugins.devices.ctvideo_3m.uvc_initializer import UVCInitializer
-            initializer = UVCInitializer(cv2)
-            initialization = initializer.apply(capture, self._uvc_settings)
-            for item in initialization:
-                state = "OK" if item["applied"] else "SKIP"
-                self.gain_status.emit(
-                    f"UVC {state} {item['name']} "
-                    f"(E{item['entity']:02X}/S{item['selector']:02X}): {item['detail']}"
-                )
+            initializer = None
+            try:
+                from plugins.devices.ctvideo_3m.uvc_initializer import UVCInitializer
+                initializer = UVCInitializer(cv2)
+                initialization = initializer.apply(capture, self._uvc_settings)
+                for item in initialization:
+                    state = "OK" if item["applied"] else "SKIP"
+                    self.gain_status.emit(
+                        f"UVC {state} {item['name']} "
+                        f"(E{item['entity']:02X}/S{item['selector']:02X}): {item['detail']}"
+                    )
+            except Exception as error:
+                # Camera preview must remain available even when optional UVC
+                # property initialization is rejected by the Windows driver.
+                self.gain_status.emit(f"UVC initialization skipped: {error}")
             properties = self._camera_properties(capture)
             self.camera_properties.emit(properties)
             self.gain_status.emit(f"Gain: {properties['gain']:g}")
@@ -110,11 +116,15 @@ class CTVideoWorker(QThread):
                 if self._pending_uvc_settings is not None:
                     settings = self._pending_uvc_settings
                     self._pending_uvc_settings = None
-                    for item in initializer.apply(capture, settings):
-                        state = "OK" if item["applied"] else "SKIP"
-                        self.gain_status.emit(
-                            f"UVC {state} {item['name']}: {item['detail']}"
-                        )
+                    if initializer is not None:
+                        try:
+                            for item in initializer.apply(capture, settings):
+                                state = "OK" if item["applied"] else "SKIP"
+                                self.gain_status.emit(
+                                    f"UVC {state} {item['name']}: {item['detail']}"
+                                )
+                        except Exception as error:
+                            self.gain_status.emit(f"UVC update skipped: {error}")
                 self._apply_gain(capture)
                 self._apply_brightness(capture)
                 ok, frame = capture.read()
@@ -152,7 +162,10 @@ class CTVideoView(QWidget):
         layout.addWidget(group)
 
     def start_preview(self, source=0, camera_name="", uvc_settings=None):
-        self.stop_preview()
+        if not self.stop_preview():
+            self.status.setText("Video thread: previous worker is still stopping")
+            self.log("CTvideo 3M: preview restart blocked until the previous thread stops")
+            return False
         source = int(source) if str(source).strip().isdigit() else str(source).strip()
         self.source = source
         self.worker = CTVideoWorker(source, camera_name, uvc_settings, self)
@@ -164,6 +177,7 @@ class CTVideoView(QWidget):
         self.worker.finished.connect(self.worker_finished)
         self.status.setText(f"Video thread: starting ({source})")
         self.worker.start()
+        return True
 
     def set_gain(self, gain):
         if self.worker is not None:
@@ -189,12 +203,14 @@ class CTVideoView(QWidget):
         if self.worker is not None:
             worker = self.worker
             worker.requestInterruption()
-            worker.wait(1500)
+            if not worker.wait(4000):
+                return False
             if self.worker is worker:
                 self.worker = None
         self.preview.clear()
         self.preview.setText("CTvideo 3M\nVIDEO STANDBY")
         self.status.setText("Video thread: stopped")
+        return True
 
     def update_frame(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)

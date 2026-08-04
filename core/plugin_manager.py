@@ -11,6 +11,22 @@ class DataColumn:
     label: str
 
 
+@dataclass(frozen=True)
+class ExperimentPlugin:
+    experiment_id: str
+    display_name: str
+    recipe_factory: Callable[[], list[dict[str, Any]]] | None = None
+    panel_factory: Callable[[Any, Any], Any] | None = None
+    description: str = ""
+    order: int = 100
+
+    def create_recipe(self) -> list[dict[str, Any]]:
+        """Return a fresh sequence recipe for this experiment."""
+        if self.recipe_factory is None:
+            raise ValueError(f"{self.display_name} does not provide a sequence recipe.")
+        return [dict(step) for step in self.recipe_factory()]
+
+
 class DevicePlugin(ABC):
     device_id: str
     display_name: str
@@ -45,4 +61,21 @@ def load_device_plugins() -> dict[str, DevicePlugin]:
         if candidate.device_id in plugins:
             raise ValueError(f"Duplicate device plug-in id: {candidate.device_id}")
         plugins[candidate.device_id] = candidate
+    return dict(sorted(plugins.items(), key=lambda item: (item[1].order, item[0])))
+
+
+def load_experiment_plugins() -> dict[str, ExperimentPlugin]:
+    """Discover modules exporting ``plugin`` from ``plugins.experiments``."""
+    package = importlib.import_module("plugins.experiments")
+    plugins: dict[str, ExperimentPlugin] = {}
+    for info in pkgutil.iter_modules(package.__path__):
+        if info.ispkg or info.name.startswith("_"):
+            continue
+        module = importlib.import_module(f"plugins.experiments.{info.name}")
+        candidate = getattr(module, "plugin", None)
+        if not isinstance(candidate, ExperimentPlugin):
+            continue
+        if candidate.experiment_id in plugins:
+            raise ValueError(f"Duplicate experiment plug-in id: {candidate.experiment_id}")
+        plugins[candidate.experiment_id] = candidate
     return dict(sorted(plugins.items(), key=lambda item: (item[1].order, item[0])))

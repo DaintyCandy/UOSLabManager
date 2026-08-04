@@ -89,6 +89,7 @@ class CTVideo3MPanel(QWidget):
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.document().setMaximumBlockCount(2000)
         self.log_box.setMinimumHeight(150)
         self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
         layout.addWidget(self.log_box)
@@ -253,7 +254,21 @@ class CTVideo3MPanel(QWidget):
             port = self.port_input.text().strip()
             interval = 1.0 / self.refresh_rate.value()
             self.manager.add_device("CTVIDEO3M", lambda: CTVideo3M(port), interval=interval)
-            device_info = resolve_camera_for_port(port)
+            try:
+                device_info = resolve_camera_for_port(port)
+            except Exception as camera_error:
+                # Keep the pyrometer usable and start the known CTvideo camera
+                # through OpenCV when Windows Container-ID resolution fails.
+                device_info = {
+                    "PortName": port,
+                    "CameraIndex": 1,
+                    "CameraName": "CTvideo OpenCV fallback",
+                    "CameraDevicePath": "OpenCV DirectShow index 1",
+                }
+                self.log(
+                    f"Camera mapping failed ({camera_error}); "
+                    "using OpenCV camera index 1."
+                )
             self._show_connection_addresses(device_info)
             self.video_view.start_preview(
                 device_info["CameraIndex"], device_info["CameraName"],
@@ -299,7 +314,6 @@ class CTVideo3MPanel(QWidget):
         gain_step = max(1, int(properties.get("gain_step") or 1))
         self.camera_gain.setRange(gain_min, gain_max)
         self.camera_gain.setSingleStep(gain_step)
-        self.camera_gain.setTickInterval(gain_step)
         gain = properties.get("gain")
         self.camera_gain.setToolTip(
             f"Read-back: {gain}; range {gain_min}..{gain_max}, step {gain_step}"
@@ -311,7 +325,6 @@ class CTVideo3MPanel(QWidget):
         brightness_step = max(1, int(properties.get("brightness_step") or 1))
         self.camera_brightness.setRange(brightness_min, brightness_max)
         self.camera_brightness.setSingleStep(brightness_step)
-        self.camera_brightness.setTickInterval(brightness_step)
         brightness = properties.get("brightness")
         self.camera_brightness.setToolTip(
             f"Read-back: {brightness}; range {brightness_min}..{brightness_max}, step {brightness_step}"

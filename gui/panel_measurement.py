@@ -1,5 +1,6 @@
 import os
 import time
+from collections import deque
 from datetime import datetime
 
 import pyqtgraph as pg
@@ -16,6 +17,9 @@ from .widget_graph_selection import GraphSelectionTree
 
 class MeasurementPanels:
     COLORS = ("#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b")
+    GRAPH_BUFFER_POINTS = 3600
+    TABLE_BUFFER_ROWS = 1000
+    LOG_BUFFER_LINES = 2000
 
     def __init__(self, manager, plugins, log_callback):
         self.manager = manager
@@ -23,7 +27,7 @@ class MeasurementPanels:
         self.log = log_callback
         self.get_rheed_profile = lambda: None 
         self.t0 = time.time()
-        self.times = []
+        self.times = deque(maxlen=self.GRAPH_BUFFER_POINTS)
         self.series = {}
         self.curves = {}
         self.curve_colors = {}
@@ -38,9 +42,10 @@ class MeasurementPanels:
             for column in plugin.columns:
                 self.columns.append(column.label)
                 self.column_devices[column.label] = device_id
-                self.series[column.label] = []
+                self.series[column.label] = deque(maxlen=self.GRAPH_BUFFER_POINTS)
         self.data_logger = DataLogger(self.columns)
         self.rows = self.data_logger.rows
+        self.recording = False
         self.timer = QTimer()
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.update)
@@ -133,10 +138,14 @@ class MeasurementPanels:
         layout = QVBoxLayout(panel)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Data Table"))
+        self.record_button = QPushButton("Start Recording")
+        self.record_button.setCheckable(True)
+        self.record_button.toggled.connect(self.set_recording)
         save = QPushButton("Save Selected CSV")
         clear = QPushButton("Clear")
         save.clicked.connect(self.save_csv)
         clear.clicked.connect(self.clear)
+        controls.addWidget(self.record_button)
         controls.addWidget(save)
         controls.addWidget(clear)
         layout.addLayout(controls)
@@ -150,6 +159,7 @@ class MeasurementPanels:
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.document().setMaximumBlockCount(self.LOG_BUFFER_LINES)
         self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
         layout.addWidget(self.log_box)
         return group
@@ -222,11 +232,12 @@ class MeasurementPanels:
 
         # ========================================================
         # [핵심 1] 카메라 패널에서 방금 찍힌 1D 픽셀 배열을 가져옵니다.
-        profile = self.get_rheed_profile() 
+        profile = self.get_rheed_profile() if self.recording else None
         
         # [핵심 2] DataLogger에 온도 데이터(row)와 픽셀 데이터(profile)를 "세트"로 넘깁니다!
         # 기존 코드: self.rows.append(row)   <-- 이 줄을 지우고 아래 줄로 바꿉니다.
-        self.data_logger.append(row, rheed_profile=profile) 
+        if self.recording:
+            self.data_logger.append(row, rheed_profile=profile)
         # ========================================================
 
         # (이하 화면의 그래프와 표를 업데이트하는 기존 코드는 동일하게 유지)
@@ -240,9 +251,11 @@ class MeasurementPanels:
                 numeric = float("nan")
             self.series[label].append(numeric)
             for curves in self.plot_curves:
-                curves[label].setData(self.times, self.series[label])
+                curves[label].setData(list(self.times), list(self.series[label]))
 
     def _append_table_row(self, row):
+        while self.table.rowCount() >= self.TABLE_BUFFER_ROWS:
+            self.table.removeRow(0)
         table_row = self.table.rowCount()
         self.table.insertRow(table_row)
         for index, key in enumerate(self.columns):
@@ -263,6 +276,15 @@ class MeasurementPanels:
         if path:
             self.data_logger.save_csv(path, self.selected_columns())
             self.log(f"Saved selected CSV: {path}")
+
+    def set_recording(self, enabled):
+        self.recording = bool(enabled)
+        self.record_button.setText("Stop Recording" if enabled else "Start Recording")
+        if enabled:
+            self.data_logger.clear()
+            self.log("Data recording started")
+        else:
+            self.log(f"Data recording stopped ({len(self.rows)} rows captured)")
 
     def clear(self):
         self.data_logger.clear()

@@ -187,6 +187,7 @@ class LakeShore331Window(QWidget):
         layout = QVBoxLayout(group)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.document().setMaximumBlockCount(2000)
         self.log_box.setMinimumHeight(190)
         self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
         layout.addWidget(self.log_box)
