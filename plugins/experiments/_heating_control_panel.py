@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.panel_ctvideo import CTVideoView
-from plugins.devices.ctvideo_3m.driver import CTVideo3M
+from plugins.devices.ctvideo_3m.connection import create_ctvideo, default_connection
 from plugins.devices.ctvideo_3m.usb_camera import resolve_camera_for_port
 from plugins.devices.zup36_12.driver import ZUP36_12
 
@@ -258,7 +258,7 @@ class HeatingControlPanel(QWidget):
         connection_grid.addWidget(self.zup_status, 1, 2)
         connection_grid.addWidget(self.zup_button, 1, 3)
 
-        self.ctvideo_port = QLineEdit("COM6")
+        self.ctvideo_port = QLineEdit(default_connection())
         self.ctvideo_status = QLabel("Disconnected")
         self.ctvideo_button = QPushButton("Connect")
         self.ctvideo_button.clicked.connect(self.toggle_ctvideo)
@@ -538,12 +538,15 @@ class HeatingControlPanel(QWidget):
         port = self.ctvideo_port.text().strip()
         try:
             self.manager.add_device(
-                "CTVIDEO3M", lambda: CTVideo3M(port), interval=0.1
+                "CTVIDEO3M",
+                lambda: create_ctvideo(port, verify=True),
+                interval=0.1,
             )
             self.owned_devices.add("CTVIDEO3M")
             camera = resolve_camera_for_port(port)
             self.video_view.start_preview(
-                camera["CameraIndex"], camera["CameraName"]
+                camera["CameraIndex"], camera["CameraName"],
+                camera_info=camera,
             )
             self.log(f"CTvideo 3M connected: {port}")
             self._notify_main()

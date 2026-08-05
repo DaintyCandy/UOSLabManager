@@ -1,4 +1,5 @@
 import json
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -12,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.panel_ctvideo import CTVideoView
-from .driver import CTVideo3M
+from .connection import create_ctvideo, default_connection
 from .usb_camera import resolve_camera_for_port
 
 
@@ -64,12 +65,12 @@ class CTVideo3MPanel(QWidget):
     def _build_monitor(self):
         group = QGroupBox("CTvideo 3M")
         layout = QGridLayout(group)
-        self.port_input = QLineEdit("COM6")
+        self.port_input = QLineEdit(default_connection())
         self.status_label = QLabel("Disconnected")
         self.response_label = QLabel("Response: -")
         self.connection_button = QPushButton("Connect")
         self.connection_button.clicked.connect(self.toggle_connection)
-        layout.addWidget(QLabel("Port"), 0, 0)
+        layout.addWidget(QLabel("Port / D2XX serial"), 0, 0)
         layout.addWidget(self.port_input, 0, 1)
         layout.addWidget(self.status_label, 0, 2)
         layout.addWidget(self.connection_button, 0, 3)
@@ -253,17 +254,21 @@ class CTVideo3MPanel(QWidget):
         try:
             port = self.port_input.text().strip()
             interval = 1.0 / self.refresh_rate.value()
-            self.manager.add_device("CTVIDEO3M", lambda: CTVideo3M(port), interval=interval)
+            self.manager.add_device(
+                "CTVIDEO3M",
+                lambda: create_ctvideo(port, verify=True),
+                interval=interval,
+            )
             try:
                 device_info = resolve_camera_for_port(port)
             except Exception as camera_error:
                 # Keep the pyrometer usable and start the known CTvideo camera
-                # through OpenCV when Windows Container-ID resolution fails.
+                # through OpenCV when automatic sibling resolution fails.
                 device_info = {
                     "PortName": port,
                     "CameraIndex": 1,
                     "CameraName": "CTvideo OpenCV fallback",
-                    "CameraDevicePath": "OpenCV DirectShow index 1",
+                    "CameraDevicePath": "OpenCV camera index 1",
                 }
                 self.log(
                     f"Camera mapping failed ({camera_error}); "
@@ -272,7 +277,7 @@ class CTVideo3MPanel(QWidget):
             self._show_connection_addresses(device_info)
             self.video_view.start_preview(
                 device_info["CameraIndex"], device_info["CameraName"],
-                self.camera_settings(),
+                self.camera_settings(), camera_info=device_info,
             )
             self.monitor_timer.start()
             self.log(
@@ -299,36 +304,110 @@ class CTVideo3MPanel(QWidget):
         self.video_view.stop_preview()
 
     def update_camera_properties(self, properties):
-        raw = properties.get("auto_exposure_raw", 0.0)
-        enabled = properties.get("auto_exposure", False)
+        raw = properties.get("auto_exposure_raw")
+        enabled = properties.get("auto_exposure")
         if enabled is None:
             self.auto_exposure_label.setText("Auto exposure: unsupported")
         else:
             self.auto_exposure_label.setText(
                 f"Auto exposure: {'ON' if enabled else 'OFF'} (flags {raw})"
             )
-        gain_supported = properties.get("gain_supported", False)
-        self.camera_gain_supported = gain_supported
-        gain_min = int(properties.get("gain_min") or 0)
-        gain_max = int(properties.get("gain_max") or 4)
-        gain_step = max(1, int(properties.get("gain_step") or 1))
-        self.camera_gain.setRange(gain_min, gain_max)
-        self.camera_gain.setSingleStep(gain_step)
-        gain = properties.get("gain")
-        self.camera_gain.setToolTip(
-            f"Read-back: {gain}; range {gain_min}..{gain_max}, step {gain_step}"
+        controls = properties.get("uvc_controls", {})
+        integer_widgets = {
+            "Brightness": self.camera_brightness,
+            "Contrast": self.camera_contrast,
+            "Gain": self.camera_gain,
+            "Hue": self.camera_hue,
+            "Saturation": self.camera_saturation,
+            "Sharpness": self.camera_sharpness,
+            "Gamma": self.camera_gamma,
+            "Exposure Absolute": self.camera_exposure,
+        }
+        for name, widget in integer_widgets.items():
+            metadata = controls.get(name)
+            if metadata is None:
+                continue
+            supported = bool(
+                metadata.get("supported") and metadata.get("settable")
+            )
+            widget.setEnabled(supported)
+            if not supported:
+                widget.setToolTip("Unsupported by this camera's UVC descriptor")
+                continue
+            minimum = metadata.get("minimum")
+            maximum = metadata.get("maximum")
+            current = metadata.get("current")
+            default = metadata.get("default")
+            range_values = [
+                value for value in (minimum, maximum, current, default)
+                if value is not None
+            ]
+            if range_values:
+                widget.setRange(min(range_values), max(range_values))
+            step = max(1, int(metadata.get("step") or 1))
+            widget.setSingleStep(step)
+            if current is not None:
+                widget.setValue(int(current))
+            widget.setToolTip(
+                f"Read-back: {current}; advertised range "
+                f"{minimum}..{maximum}, step {step}; default {default}"
+            )
+
+        self.camera_gain_supported = bool(properties.get("gain_supported"))
+        self.camera_brightness_supported = bool(
+            properties.get("brightness_supported")
         )
-        brightness_supported = properties.get("brightness_supported", False)
-        self.camera_brightness_supported = brightness_supported
-        brightness_min = int(properties.get("brightness_min") or 0)
-        brightness_max = int(properties.get("brightness_max") or 255)
-        brightness_step = max(1, int(properties.get("brightness_step") or 1))
-        self.camera_brightness.setRange(brightness_min, brightness_max)
-        self.camera_brightness.setSingleStep(brightness_step)
-        brightness = properties.get("brightness")
-        self.camera_brightness.setToolTip(
-            f"Read-back: {brightness}; range {brightness_min}..{brightness_max}, step {brightness_step}"
-        )
+
+        combo_widgets = {
+            "Power Line": self.camera_power_line,
+            "Auto Exposure Mode": self.camera_ae_mode,
+        }
+        for name, widget in combo_widgets.items():
+            metadata = controls.get(name)
+            if metadata is None:
+                continue
+            supported = bool(
+                metadata.get("supported") and metadata.get("settable")
+            )
+            widget.setEnabled(supported)
+            current = metadata.get("current")
+            if supported and current is not None:
+                index = widget.findData(current)
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            widget.setToolTip(
+                f"Read-back: {current}"
+                if supported else "Unsupported by this camera's UVC descriptor"
+            )
+
+        priority = controls.get("Auto Exposure Priority")
+        if priority is not None:
+            priority_supported = bool(
+                priority.get("supported") and priority.get("settable")
+            )
+            self.camera_ae_priority.setEnabled(priority_supported)
+            if priority_supported and priority.get("current") is not None:
+                self.camera_ae_priority.setChecked(bool(priority["current"]))
+            self.camera_ae_priority.setToolTip(
+                f"Read-back: {priority.get('current')}"
+                if priority_supported
+                else "Unsupported by this camera's UVC descriptor"
+            )
+        if sys.platform == "darwin":
+            self.camera_roi.setEnabled(False)
+            self.camera_roi.setToolTip(
+                "The CTvideo camera does not advertise the UVC ROI control"
+            )
+            if not controls:
+                unavailable = "macOS native UVC control information is unavailable"
+                for widget in integer_widgets.values():
+                    widget.setEnabled(False)
+                    widget.setToolTip(unavailable)
+                for widget in combo_widgets.values():
+                    widget.setEnabled(False)
+                    widget.setToolTip(unavailable)
+                self.camera_ae_priority.setEnabled(False)
+                self.camera_ae_priority.setToolTip(unavailable)
 
     def _show_connection_addresses(self, info):
         self.port_address_label.setText(info.get("PortInstanceId") or "-")
@@ -453,7 +532,7 @@ class CTVideo3MPanel(QWidget):
         return settings
 
     def load_profile_data(self, data):
-        self.port_input.setText(data.get("port", "COM6"))
+        self.port_input.setText(data.get("port", default_connection()))
         self.refresh_rate.setValue(data.get("refresh_rate_Hz", 10.0))
         self.emissivity.setValue(data.get("emissivity", 1.0))
         self.transmission.setValue(data.get("transmission", 1.0))
