@@ -1,4 +1,5 @@
 from core.plugin_manager import DataColumn, DevicePlugin
+from .connection import create_ctvideo, default_connection as default_ctvideo_connection
 
 
 def create_settings_panel(manager, parent):
@@ -11,15 +12,14 @@ class CTVideo3MPlugin(DevicePlugin):
     display_name = "CTvideo 3M"
     order = 40
     connection_label = "Port"
-    default_connection = "COM6"
+    default_connection = default_ctvideo_connection()
     columns = (
         DataColumn("actual_temp_C", "CTvideo_actual_C"),
     )
     settings_factory = staticmethod(create_settings_panel)
 
     def connect(self, connection: str):
-        from .driver import CTVideo3M
-        return CTVideo3M(connection)
+        return create_ctvideo(connection, verify=True)
 
 
 plugin = CTVideo3MPlugin()

@@ -1,3 +1,4 @@
+import sys
 import time
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
@@ -10,6 +11,16 @@ except ImportError:
     cv2 = None
 
 
+def _capture_backend(source):
+    if not isinstance(source, int):
+        return cv2.CAP_ANY
+    if sys.platform == "win32":
+        return getattr(cv2, "CAP_DSHOW", cv2.CAP_ANY)
+    if sys.platform == "darwin":
+        return getattr(cv2, "CAP_AVFOUNDATION", cv2.CAP_ANY)
+    return cv2.CAP_ANY
+
+
 class CTVideoWorker(QThread):
     frame_ready = pyqtSignal(object)
     video_error = pyqtSignal(str)
@@ -17,10 +28,14 @@ class CTVideoWorker(QThread):
     brightness_status = pyqtSignal(str)
     camera_properties = pyqtSignal(object)
 
-    def __init__(self, source, camera_name, uvc_settings=None, parent=None):
+    def __init__(
+        self, source, camera_name, uvc_settings=None, camera_info=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.source = source
         self.camera_name = camera_name
+        self.camera_info = dict(camera_info or {})
         self._uvc_settings = dict(uvc_settings or {})
         self._pending_uvc_settings = None
         self._requested_gain = None
@@ -38,6 +53,23 @@ class CTVideoWorker(QThread):
         self._pending_uvc_settings = dict(settings)
 
     def _camera_properties(self, capture):
+        if sys.platform != "win32":
+            return {
+                "gain_supported": False,
+                "gain": None,
+                "gain_min": None,
+                "gain_max": None,
+                "gain_step": None,
+                "brightness_supported": False,
+                "brightness": None,
+                "brightness_min": None,
+                "brightness_max": None,
+                "brightness_step": None,
+                "exposure_supported": False,
+                "auto_exposure": None,
+                "auto_exposure_raw": None,
+                "uvc_controls": {},
+            }
         auto_exposure = capture.get(cv2.CAP_PROP_AUTO_EXPOSURE)
         return {
             "gain_supported": True,
@@ -86,7 +118,7 @@ class CTVideoWorker(QThread):
         if cv2 is None:
             self.video_error.emit("OpenCV is not installed.")
             return
-        backend = cv2.CAP_DSHOW if isinstance(self.source, int) and hasattr(cv2, "CAP_DSHOW") else cv2.CAP_ANY
+        backend = _capture_backend(self.source)
         capture = cv2.VideoCapture(self.source, backend)
         if not capture.isOpened():
             self.video_error.emit(f"Cannot open CTvideo camera source: {self.source}")
@@ -94,29 +126,90 @@ class CTVideoWorker(QThread):
             return
         try:
             initializer = None
-            try:
-                from plugins.devices.ctvideo_3m.uvc_initializer import UVCInitializer
-                initializer = UVCInitializer(cv2)
-                initialization = initializer.apply(capture, self._uvc_settings)
-                for item in initialization:
-                    state = "OK" if item["applied"] else "SKIP"
-                    self.gain_status.emit(
-                        f"UVC {state} {item['name']} "
-                        f"(E{item['entity']:02X}/S{item['selector']:02X}): {item['detail']}"
+            native_controller = None
+            properties = None
+            if sys.platform == "win32":
+                try:
+                    from plugins.devices.ctvideo_3m.uvc_initializer import UVCInitializer
+                    initializer = UVCInitializer(cv2)
+                    initialization = initializer.apply(capture, self._uvc_settings)
+                    for item in initialization:
+                        state = "OK" if item["applied"] else "SKIP"
+                        self.gain_status.emit(
+                            f"UVC {state} {item['name']} "
+                            f"(E{item['entity']:02X}/S{item['selector']:02X}): {item['detail']}"
+                        )
+                except Exception as error:
+                    # Camera preview must remain available even when optional
+                    # UVC property initialization is rejected by the driver.
+                    self.gain_status.emit(f"UVC initialization skipped: {error}")
+            elif sys.platform == "darwin":
+                try:
+                    from plugins.devices.ctvideo_3m.macos_uvc import (
+                        MacOSUVCController,
                     )
-            except Exception as error:
-                # Camera preview must remain available even when optional UVC
-                # property initialization is rejected by the Windows driver.
-                self.gain_status.emit(f"UVC initialization skipped: {error}")
-            properties = self._camera_properties(capture)
+                    native_controller = MacOSUVCController(
+                        self.camera_info.get("CameraLocationId")
+                    )
+                    native_controller.probe()
+                    properties = native_controller.camera_properties()
+                    self.gain_status.emit(
+                        "macOS native UVC controls ready"
+                    )
+                except Exception as error:
+                    self.gain_status.emit(
+                        f"macOS native UVC controls unavailable: {error}"
+                    )
+            else:
+                self.gain_status.emit(
+                    "UVC initialization skipped: unsupported platform"
+                )
+            if properties is None:
+                properties = self._camera_properties(capture)
             self.camera_properties.emit(properties)
-            self.gain_status.emit(f"Gain: {properties['gain']:g}")
-            self.brightness_status.emit(f"Brightness: {properties['brightness']:g}")
+            gain = properties.get("gain")
+            brightness = properties.get("brightness")
+            self.gain_status.emit(
+                f"Gain: {gain:g}"
+                if properties.get("gain_supported") and gain is not None
+                else "Gain: unsupported"
+            )
+            self.brightness_status.emit(
+                f"Brightness: {brightness:g}"
+                if properties.get("brightness_supported")
+                and brightness is not None
+                else "Brightness: unsupported"
+            )
             while not self.isInterruptionRequested():
                 if self._pending_uvc_settings is not None:
                     settings = self._pending_uvc_settings
                     self._pending_uvc_settings = None
-                    if initializer is not None:
+                    if native_controller is not None:
+                        try:
+                            for item in native_controller.apply(settings):
+                                state = "OK" if item["applied"] else "SKIP"
+                                self.gain_status.emit(
+                                    f"UVC {state} {item['name']}: {item['detail']}"
+                                )
+                            properties = native_controller.camera_properties()
+                            self.camera_properties.emit(properties)
+                            gain = properties.get("gain")
+                            brightness = properties.get("brightness")
+                            self.gain_status.emit(
+                                f"Gain: {gain:g}"
+                                if properties.get("gain_supported")
+                                and gain is not None
+                                else "Gain: unsupported"
+                            )
+                            self.brightness_status.emit(
+                                f"Brightness: {brightness:g}"
+                                if properties.get("brightness_supported")
+                                and brightness is not None
+                                else "Brightness: unsupported"
+                            )
+                        except Exception as error:
+                            self.gain_status.emit(f"UVC update failed: {error}")
+                    elif initializer is not None:
                         try:
                             for item in initializer.apply(capture, settings):
                                 state = "OK" if item["applied"] else "SKIP"
@@ -161,14 +254,22 @@ class CTVideoView(QWidget):
         body.addWidget(self.status)
         layout.addWidget(group)
 
-    def start_preview(self, source=0, camera_name="", uvc_settings=None):
+    def start_preview(
+        self, source=0, camera_name="", uvc_settings=None, camera_info=None,
+    ):
         if not self.stop_preview():
             self.status.setText("Video thread: previous worker is still stopping")
             self.log("CTvideo 3M: preview restart blocked until the previous thread stops")
             return False
         source = int(source) if str(source).strip().isdigit() else str(source).strip()
         self.source = source
-        self.worker = CTVideoWorker(source, camera_name, uvc_settings, self)
+        self.worker = CTVideoWorker(
+            source,
+            camera_name,
+            uvc_settings,
+            camera_info=camera_info,
+            parent=self,
+        )
         self.worker.frame_ready.connect(self.update_frame)
         self.worker.video_error.connect(self.handle_error)
         self.worker.gain_status.connect(self.handle_gain_status)
