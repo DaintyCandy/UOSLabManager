@@ -83,14 +83,14 @@ class HeatingPIDWorker(QThread):
         voltage_limit = config["voltage_limit"]
         current_limit = config["current_limit"]
         power_limit = config["power_limit"]
-        current_cap = min(
-            current_limit,
-            0.0 if voltage_limit <= 0 else power_limit / voltage_limit,
+        power_cap = min(
+            power_limit,
+            max(0.0, voltage_limit) * max(0.0, current_limit),
         )
         integral = 0.0
         previous_temperature = None
         commanded_current = 0.0
-        ramped_power = 0.0
+        commanded_power = 0.0
         previous_at = time.monotonic()
         safety_reason = ""
         try:
@@ -142,14 +142,36 @@ class HeatingPIDWorker(QThread):
                     base_output = config["p"] * error + config["d"] * derivative
                     unsaturated = base_output + config["i"] * candidate_integral
                     if (
-                        0.0 < unsaturated < current_cap
-                        or (unsaturated >= current_cap and error < 0)
+                        0.0 < unsaturated < power_cap
+                        or (unsaturated >= power_cap and error < 0)
                         or (unsaturated <= 0.0 and error > 0)
                     ):
                         integral = candidate_integral
-                    desired_current = base_output + config["i"] * integral
-                    desired_current = max(0.0, min(current_cap, desired_current))
+                    desired_power = base_output + config["i"] * integral
+                    desired_power = max(0.0, min(power_cap, desired_power))
 
+                    if (
+                        config["power_ramp_enabled"]
+                        and desired_power > commanded_power
+                    ):
+                        desired_power = min(
+                            desired_power,
+                            commanded_power + config["power_ramp_rate"] * elapsed,
+                        )
+                    measured_voltage = zup_values.get("voltage_V", 0.0)
+                    conversion_voltage = (
+                        float(measured_voltage)
+                        if measured_voltage is not None
+                        and math.isfinite(float(measured_voltage))
+                        and float(measured_voltage) > 0.1
+                        else voltage_limit
+                    )
+                    desired_current = min(
+                        current_limit,
+                        0.0
+                        if conversion_voltage <= 0.0
+                        else desired_power / conversion_voltage,
+                    )
                     if (
                         config["current_ramp_enabled"]
                         and desired_current > commanded_current
@@ -158,24 +180,12 @@ class HeatingPIDWorker(QThread):
                             desired_current,
                             commanded_current + config["current_ramp_rate"] * elapsed,
                         )
-                    desired_power = desired_current * voltage_limit
-                    if (
-                        config["power_ramp_enabled"]
-                        and desired_power > ramped_power
-                    ):
-                        ramped_power = min(
-                            desired_power,
-                            ramped_power + config["power_ramp_rate"] * elapsed,
-                        )
-                        desired_current = min(
-                            desired_current,
-                            0.0 if voltage_limit <= 0 else ramped_power / voltage_limit,
-                        )
-                    else:
-                        ramped_power = desired_power
                     commanded_current = desired_current
+                    commanded_power = min(
+                        power_cap, commanded_current * conversion_voltage
+                    )
                     device.set_current(commanded_current)
-                    self.output_changed.emit(commanded_current, ramped_power)
+                    self.output_changed.emit(commanded_current, commanded_power)
                 for _ in range(10):
                     if self.isInterruptionRequested():
                         break
@@ -353,12 +363,12 @@ class HeatingControlPanel(QWidget):
 
         pid_group = QGroupBox("PID")
         pid_form = QFormLayout(pid_group)
-        self.pid_p = self._spin(0.0, 1000.0, 0.02, 4)
-        self.pid_i = self._spin(0.0, 1000.0, 0.001, 4)
+        self.pid_p = self._spin(0.0, 1000.0, 0.24, 4)
+        self.pid_i = self._spin(0.0, 1000.0, 0.012, 4)
         self.pid_d = self._spin(0.0, 1000.0, 0.0, 4)
-        pid_form.addRow("P [A/°C]", self.pid_p)
-        pid_form.addRow("I [A/(°C·s)]", self.pid_i)
-        pid_form.addRow("D [A·s/°C]", self.pid_d)
+        pid_form.addRow("P [W/°C]", self.pid_p)
+        pid_form.addRow("I [W/(°C·s)]", self.pid_i)
+        pid_form.addRow("D [W·s/°C]", self.pid_d)
 
         limit_group = QGroupBox("Output Limits")
         limit_form = QFormLayout(limit_group)
@@ -379,7 +389,7 @@ class HeatingControlPanel(QWidget):
         controls = QVBoxLayout()
         self.control_status = QLabel("Stopped")
         self.control_status.setStyleSheet("font-weight:bold; color:#e74c3c;")
-        self.control_output_label = QLabel("Current: - / Power command: -")
+        self.control_output_label = QLabel("Power command: - / Current command: -")
         self.start_control_button = QPushButton("Start Heating Control")
         self.start_control_button.setStyleSheet(
             "background:#1f8f4e; color:white; font-weight:bold;"
@@ -529,19 +539,37 @@ class HeatingControlPanel(QWidget):
         self._notify_main()
 
     def toggle_ctvideo(self):
-        if self.manager.get_device("CTVIDEO3M") is None:
+        if (
+            self.manager.get_device("CTVIDEO3M") is None
+            or self.video_view.worker is None
+        ):
             self.connect_ctvideo()
         else:
             self.disconnect_ctvideo()
 
     def connect_ctvideo(self):
         port = self.ctvideo_port.text().strip()
+        created_device = False
         try:
-            self.manager.add_device(
-                "CTVIDEO3M", lambda: CTVideo3M(port), interval=0.1
-            )
-            self.owned_devices.add("CTVIDEO3M")
-            camera = resolve_camera_for_port(port)
+            if self.manager.get_device("CTVIDEO3M") is None:
+                self.manager.add_device(
+                    "CTVIDEO3M", lambda: CTVideo3M(port), interval=0.1
+                )
+                self.owned_devices.add("CTVIDEO3M")
+                created_device = True
+            else:
+                self.log("Using the existing CTvideo 3M serial connection")
+            try:
+                camera = resolve_camera_for_port(port)
+            except Exception as camera_error:
+                camera = {
+                    "CameraIndex": 1,
+                    "CameraName": "CTvideo OpenCV fallback",
+                }
+                self.log(
+                    f"Camera mapping failed ({camera_error}); "
+                    "starting automatic OpenCV source recovery."
+                )
             self.video_view.start_preview(
                 camera["CameraIndex"], camera["CameraName"]
             )
@@ -549,7 +577,7 @@ class HeatingControlPanel(QWidget):
             self._notify_main()
         except Exception as error:
             self.video_view.stop_preview()
-            if "CTVIDEO3M" in self.owned_devices:
+            if created_device:
                 self.manager.remove_device("CTVIDEO3M")
                 self.owned_devices.discard("CTVIDEO3M")
             self.show_error("CTvideo 3M", error)
@@ -558,9 +586,12 @@ class HeatingControlPanel(QWidget):
         if self.control_active:
             self.stop_control(wait=True)
         self.video_view.stop_preview()
-        self.manager.remove_device("CTVIDEO3M")
-        self.owned_devices.discard("CTVIDEO3M")
-        self.log("CTvideo 3M disconnected")
+        if "CTVIDEO3M" in self.owned_devices:
+            self.manager.remove_device("CTVIDEO3M")
+            self.owned_devices.discard("CTVIDEO3M")
+            self.log("CTvideo 3M disconnected")
+        else:
+            self.log("Detached from the shared CTvideo 3M preview")
         self._notify_main()
 
     def read_zup_settings(self):
@@ -572,8 +603,10 @@ class HeatingControlPanel(QWidget):
             values = device.read_settings()
             self.zup_voltage.setValue(values["voltage"])
             self.zup_current.setValue(values["current"])
-            self.zup_ovp.setValue(values["ovp"])
-            self.zup_uvp.setValue(values["uvp"])
+            if "ovp" in values:
+                self.zup_ovp.setValue(values["ovp"])
+            if "uvp" in values:
+                self.zup_uvp.setValue(values["uvp"])
             self.zup_output.setChecked(values["output"])
             self.log("ZUP settings read")
         except Exception as error:
@@ -692,7 +725,7 @@ class HeatingControlPanel(QWidget):
 
     def update_control_status(self, status):
         if status == "Running":
-            self.control_status.setText("Running / Current PID")
+            self.control_status.setText("Running / Power PID")
             self.control_status.setStyleSheet("font-weight:bold; color:#2ecc71;")
         elif self.control_safety_reason:
             self.control_status.setText("SAFETY STOP")
@@ -703,7 +736,7 @@ class HeatingControlPanel(QWidget):
 
     def update_control_output(self, current, power):
         self.control_output_label.setText(
-            f"Current command: {current:.3f} A / Power command: {power:.2f} W"
+            f"Power command: {power:.2f} W / Current command: {current:.3f} A"
         )
 
     def handle_safety_trip(self, reason):
@@ -797,7 +830,15 @@ class HeatingControlPanel(QWidget):
         status.setStyleSheet(
             f"color:{'#2ecc71' if connected else '#e74c3c'}; font-weight:bold;"
         )
-        button.setText("Disconnect" if connected else "Connect")
+        preview_detached = (
+            device_id == "CTVIDEO3M"
+            and connected
+            and self.video_view.worker is None
+        )
+        button.setText(
+            "Show Video" if preview_detached
+            else ("Disconnect" if connected else "Connect")
+        )
         button.setStyleSheet(
             "color:white; font-weight:bold; background:"
             + ("#c0392b;" if connected else "#1f8f4e;")

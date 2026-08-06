@@ -31,6 +31,7 @@ class CTVideo3MPanel(QWidget):
         self.last_plotted_update = None
         self.camera_gain_supported = False
         self.camera_brightness_supported = False
+        self._video_attach_attempted = False
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self.refresh_monitoring)
         self._build_ui()
@@ -254,22 +255,9 @@ class CTVideo3MPanel(QWidget):
             port = self.port_input.text().strip()
             interval = 1.0 / self.refresh_rate.value()
             self.manager.add_device("CTVIDEO3M", lambda: CTVideo3M(port), interval=interval)
-            try:
-                device_info = resolve_camera_for_port(port)
-            except Exception as camera_error:
-                # Keep the pyrometer usable and start the known CTvideo camera
-                # through OpenCV when Windows Container-ID resolution fails.
-                device_info = {
-                    "PortName": port,
-                    "CameraIndex": 1,
-                    "CameraName": "CTvideo OpenCV fallback",
-                    "CameraDevicePath": "OpenCV DirectShow index 1",
-                }
-                self.log(
-                    f"Camera mapping failed ({camera_error}); "
-                    "using OpenCV camera index 1."
-                )
+            device_info = self._resolve_camera_info(port)
             self._show_connection_addresses(device_info)
+            self._video_attach_attempted = True
             self.video_view.start_preview(
                 device_info["CameraIndex"], device_info["CameraName"],
                 self.camera_settings(),
@@ -288,10 +276,46 @@ class CTVideo3MPanel(QWidget):
             self._notify_main()
             self.show_error(error)
 
+    def _resolve_camera_info(self, port):
+        try:
+            return resolve_camera_for_port(port)
+        except Exception as camera_error:
+            # The capture worker tries alternative backends and indices if
+            # this preferred fallback is unavailable.
+            self.log(
+                f"Camera mapping failed ({camera_error}); "
+                "starting automatic OpenCV source recovery."
+            )
+            return {
+                "PortName": port,
+                "CameraIndex": 1,
+                "CameraName": "CTvideo OpenCV fallback",
+                "CameraDevicePath": "OpenCV preferred index 1 with recovery",
+            }
+
+    def ensure_video_preview(self):
+        if (
+            self.get_device() is None
+            or self.video_view.worker is not None
+            or self._video_attach_attempted
+        ):
+            return
+        self._video_attach_attempted = True
+        try:
+            info = self._resolve_camera_info(self.port_input.text().strip())
+            self._show_connection_addresses(info)
+            self.video_view.start_preview(
+                info["CameraIndex"], info["CameraName"], self.camera_settings()
+            )
+            self.log("Attached to the shared CTvideo camera preview")
+        except Exception as error:
+            self.log(f"Camera preview attach failed: {error}")
+
     def disconnect_device(self):
         self.manager.remove_device("CTVIDEO3M")
         self.monitor_timer.stop()
         self.stop_video()
+        self._video_attach_attempted = False
         self.log("Pyrometer communication disconnected")
         self._notify_main()
 
@@ -494,6 +518,10 @@ class CTVideo3MPanel(QWidget):
         self.connection_button.setText("Disconnect" if connected else "Connect")
         self.port_input.setEnabled(not connected)
         self.refresh_rate.setEnabled(not connected)
+        if connected:
+            self.ensure_video_preview()
+        else:
+            self._video_attach_attempted = False
         self.update_realtime_status()
 
     def update_realtime_status(self):

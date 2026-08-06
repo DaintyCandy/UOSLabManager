@@ -15,13 +15,15 @@ class DeviceProxy:
 
 
 class DeviceWorker(threading.Thread):
-    def __init__(self, name, factory, update_callback, failure_callback, interval=1.0):
+    def __init__(self, name, factory, update_callback, failure_callback,
+                 interval=1.0, max_poll_failures=3):
         super().__init__(name=f"DeviceWorker-{name}", daemon=True)
         self.device_name = name
         self.factory = factory
         self.update_callback = update_callback
         self.failure_callback = failure_callback
         self.interval = interval
+        self.max_poll_failures = max(1, int(max_poll_failures))
         self.commands = queue.Queue()
         self.stop_sentinel = object()
         self.stop_event = threading.Event()
@@ -38,6 +40,7 @@ class DeviceWorker(threading.Thread):
             return
         self.ready.set()
         next_poll = time.monotonic()
+        consecutive_poll_failures = 0
         try:
             while not self.stop_event.is_set():
                 timeout = max(0.0, next_poll - time.monotonic())
@@ -64,9 +67,12 @@ class DeviceWorker(threading.Thread):
                         raise TypeError("read_all() must return a dictionary")
                     response_ms = (time.perf_counter() - started) * 1000.0
                     self.update_callback(self.device_name, self, values, response_ms)
+                    consecutive_poll_failures = 0
                 except Exception as error:
-                    self.failure_callback(self.device_name, self, error)
-                    break
+                    consecutive_poll_failures += 1
+                    if consecutive_poll_failures >= self.max_poll_failures:
+                        self.failure_callback(self.device_name, self, error)
+                        break
                 next_poll = time.monotonic() + self.interval
         finally:
             self._fail_pending(RuntimeError(f"{self.device_name} is disconnected"))
@@ -132,13 +138,15 @@ class DeviceManager:
         self.disconnect_errors = {}
         self.lock = threading.RLock()
 
-    def add_device(self, name: str, device_or_factory, interval=1.0):
+    def add_device(self, name: str, device_or_factory, interval=1.0,
+                   max_poll_failures=3):
         with self.lock:
             if name in self.devices:
                 raise ValueError(f"{name} already exists")
             worker = DeviceWorker(
                 name, device_or_factory, self._updated, self._failed,
                 interval=max(0.001, float(interval)),
+                max_poll_failures=max_poll_failures,
             )
             self.workers[name] = worker
             self.devices[name] = DeviceProxy(worker)

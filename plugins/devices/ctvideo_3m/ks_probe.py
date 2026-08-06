@@ -320,6 +320,28 @@ def _enumerate_video_filters():
         _release(dev_enum)
 
 
+def enumerate_video_inputs() -> list[dict]:
+    """Return DirectShow video inputs in the same order used by CAP_DSHOW."""
+    if sys.platform != "win32":
+        return []
+    initialized = not _failed(ctypes.windll.ole32.CoInitializeEx(None, 0))
+    try:
+        devices = []
+        for index, item in enumerate(_enumerate_video_filters()):
+            try:
+                devices.append({
+                    "index": index,
+                    "name": item["name"],
+                    "device_path": item["device_path"],
+                })
+            finally:
+                _release(item["filter"])
+        return devices
+    finally:
+        if initialized:
+            ctypes.windll.ole32.CoUninitialize()
+
+
 def _ks_property(ks_control, node_id, property_set, property_id, request_type):
     request = KSPROPERTY_NODE_VALUE()
     request.NodeProperty.Property.Set = property_set

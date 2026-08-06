@@ -4,6 +4,7 @@ Protocol reference: CT-CTlaser-CTvideo-commands-2018-11.pdf.
 """
 
 import threading
+import time
 
 import serial
 
@@ -39,12 +40,22 @@ class CTVideo3M:
             raise TimeoutError(f"CTvideo response timed out ({len(data)}/{size} bytes)")
         return data
 
-    def query_bytes(self, command: int, response_size: int, data: bytes = b"") -> bytes:
+    def query_bytes(self, command: int, response_size: int, data: bytes = b"",
+                    attempts: int = 2) -> bytes:
+        attempts = max(1, int(attempts))
         with self._lock:
-            self.ser.reset_input_buffer()
-            self.ser.write(bytes((command,)) + data)
-            self.ser.flush()
-            return self._read_exactly(response_size)
+            last_error = None
+            for attempt in range(attempts):
+                self.ser.reset_input_buffer()
+                self.ser.write(bytes((command,)) + data)
+                self.ser.flush()
+                try:
+                    return self._read_exactly(response_size)
+                except TimeoutError as error:
+                    last_error = error
+                    if attempt + 1 < attempts:
+                        time.sleep(0.020)
+            raise last_error
 
     def set_bytes(self, command: int, data: bytes, response_size: int | None = None) -> bytes:
         packet = bytes((command,)) + data
