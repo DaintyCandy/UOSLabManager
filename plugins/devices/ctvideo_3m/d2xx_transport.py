@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import glob
 import os
+from pathlib import Path
 
 
 FT_OK = 0
@@ -17,6 +18,7 @@ FT_PARITY_NONE = 0
 
 CTVIDEO_VENDOR_ID = 0x0403
 CTVIDEO_PRODUCT_ID = 0xDE33
+_BUNDLED_LIBRARY = Path(__file__).with_name("libftd2xx.dylib")
 
 _STATUS_NAMES = {
     1: "invalid handle",
@@ -54,6 +56,7 @@ def _library_candidates():
     discovered = ctypes.util.find_library("ftd2xx")
     candidates = [
         configured,
+        str(_BUNDLED_LIBRARY) if _BUNDLED_LIBRARY.is_file() else "",
         discovered,
         "/usr/local/lib/libftd2xx.dylib",
         "/usr/local/lib/libftd2xx.1.4.35.dylib",

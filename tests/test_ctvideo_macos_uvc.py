@@ -1,7 +1,11 @@
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+from plugins.devices.ctvideo_3m import macos_uvc
 from plugins.devices.ctvideo_3m.macos_uvc import MacOSUVCController
 
 
@@ -13,6 +17,16 @@ CONTROL\tauto-exposure-mode\tAuto Exposure Mode\t0\t0\t-\t-\t-\t-\t-
 
 
 class TestMacOSUVCController(unittest.TestCase):
+    def test_prefers_precompiled_bundled_helper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            helper = Path(directory) / "macos_uvc_helper"
+            helper.touch(mode=0o755)
+            os.chmod(helper, 0o755)
+            with patch.object(macos_uvc, "_BUNDLED_HELPER", helper):
+                selected = macos_uvc._helper_binary()
+
+        self.assertEqual(selected, helper)
+
     def test_missing_location_id_uses_unique_ctvideo_vid_pid_lookup(self):
         runner = MagicMock(return_value=SimpleNamespace(
             returncode=0, stdout=PROBE_OUTPUT, stderr="",

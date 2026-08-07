@@ -16,6 +16,7 @@ class MacOSUVCError(RuntimeError):
 
 _BUILD_LOCK = threading.Lock()
 _SOURCE = Path(__file__).with_name("macos_uvc_helper.c")
+_BUNDLED_HELPER = Path(__file__).with_name("macos_uvc_helper")
 _SETTING_KEYS = {
     "Brightness": "brightness",
     "Contrast": "contrast",
@@ -32,6 +33,8 @@ _SETTING_KEYS = {
 
 
 def _helper_binary():
+    if _BUNDLED_HELPER.is_file() and os.access(_BUNDLED_HELPER, os.X_OK):
+        return _BUNDLED_HELPER
     try:
         source = _SOURCE.read_bytes()
     except OSError as error:

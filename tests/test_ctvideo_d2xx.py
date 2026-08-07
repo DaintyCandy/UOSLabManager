@@ -1,5 +1,7 @@
 import ctypes
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -83,6 +85,22 @@ class FakeD2XX:
 
 
 class TestD2XXSerialAdapter(unittest.TestCase):
+    def test_prefers_library_bundled_beside_frozen_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundled = Path(directory) / "libftd2xx.dylib"
+            bundled.touch()
+            with (
+                patch.dict(os.environ, {"FTD2XX_LIBRARY": ""}),
+                patch.object(d2xx_transport, "_BUNDLED_LIBRARY", bundled),
+                patch.object(
+                    d2xx_transport.ctypes.util, "find_library", return_value=None
+                ),
+                patch.object(d2xx_transport.glob, "glob", return_value=[]),
+            ):
+                candidates = list(d2xx_transport._library_candidates())
+
+        self.assertEqual(candidates[0], str(bundled))
+
     def test_discovers_library_in_mounted_ftdi_disk_image(self):
         mounted = "/Volumes/dmg/release/build/libftd2xx.dylib"
         with (
