@@ -1,11 +1,14 @@
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSplitter,
-    QSizePolicy, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSplitter, QSizePolicy, QTabBar, QTabWidget,
+    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
 from core import DeviceManager, load_device_plugins, load_experiment_plugins
@@ -36,6 +39,61 @@ class MainWindow(QMainWindow):
         self.experiment_tab_containers = {}
         self.settings_panel = None
         self._build_ui()
+        self._build_legal_menu()
+
+    def _build_legal_menu(self):
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = QAction("About UOSLabManager", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+        license_action = QAction("License and third-party notices", self)
+        license_action.triggered.connect(self.show_licenses)
+        help_menu.addAction(license_action)
+
+    def show_about(self, _checked=False):
+        QMessageBox.about(
+            self,
+            "About UOSLabManager",
+            "<h3>UOSLabManager</h3>"
+            "<p>Copyright &copy; 2026 UOSLabManager contributors.</p>"
+            "<p>Free software licensed under "
+            "<b>GNU GPL version 3 or later</b>.</p>"
+            "<p>This program comes with absolutely no warranty. "
+            "See Help &gt; License and third-party notices for details.</p>"
+            "<p>Independent interoperability project; not affiliated with "
+            "or endorsed by equipment manufacturers.</p>"
+            '<p>Source: <a href="https://github.com/DaintyCandy/UOSLabManager">'
+            "github.com/DaintyCandy/UOSLabManager</a></p>",
+        )
+
+    @staticmethod
+    def _legal_resource(name):
+        root = Path(
+            getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])
+        )
+        return root / name
+
+    def show_licenses(self, _checked=False):
+        sections = []
+        for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+            path = self._legal_resource(name)
+            try:
+                contents = path.read_text(encoding="utf-8")
+            except OSError as error:
+                contents = f"Could not load {name}: {error}"
+            sections.append(f"===== {name} =====\n\n{contents}")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("UOSLabManager license and notices")
+        dialog.resize(900, 700)
+        layout = QVBoxLayout(dialog)
+        viewer = QTextBrowser()
+        viewer.setPlainText("\n\n".join(sections))
+        layout.addWidget(viewer)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _build_ui(self):
         self.measurement = MeasurementPanels(self.manager, self.plugins, self.log)
