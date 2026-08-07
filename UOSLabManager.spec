@@ -7,11 +7,20 @@ from PyInstaller.utils.hooks import collect_submodules
 
 
 project_root = Path(SPECPATH)
-native_dir = project_root / "build" / "macos-native"
+target_arch = os.environ.get("PYINSTALLER_TARGET_ARCH", "arm64")
+if target_arch not in {"arm64", "x86_64"}:
+    raise SystemExit(f"Unsupported macOS target architecture: {target_arch}")
+
+native_dir = project_root / "build" / "macos-native" / target_arch
 helper = Path(
     os.environ.get("CTVIDEO_UVC_HELPER", native_dir / "macos_uvc_helper")
 )
 d2xx = Path(os.environ.get("FTD2XX_LIBRARY", ""))
+bundle_name = (
+    "UOSLabManager.app"
+    if target_arch == "arm64"
+    else "UOSLabManager-Intel.app"
+)
 
 if not helper.is_file():
     raise SystemExit(
@@ -71,7 +80,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch="arm64",
+    target_arch=target_arch,
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -86,7 +95,7 @@ coll = COLLECT(
 )
 app = BUNDLE(
     coll,
-    name="UOSLabManager.app",
+    name=bundle_name,
     icon=None,
     bundle_identifier="kr.ac.uos.UOSLabManager",
     info_plist={

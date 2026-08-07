@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an internal, ad-hoc-signed Apple Silicon UOSLabManager app."""
+"""Build an internal, ad-hoc-signed macOS UOSLabManager app."""
 
 from __future__ import annotations
 
@@ -15,13 +15,10 @@ import sys
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-NATIVE_DIR = PROJECT_ROOT / "build" / "macos-native"
 UVC_SOURCE = (
     PROJECT_ROOT / "plugins/devices/ctvideo_3m/macos_uvc_helper.c"
 )
-UVC_HELPER = NATIVE_DIR / "macos_uvc_helper"
-APP = PROJECT_ROOT / "dist" / "UOSLabManager.app"
-ARCHIVE = PROJECT_ROOT / "dist" / "UOSLabManager-macOS-arm64.zip"
+SUPPORTED_ARCHITECTURES = ("arm64", "x86_64")
 
 
 def run(command, *, env=None):
@@ -64,13 +61,51 @@ def require_tool(name):
     return path
 
 
+def require_architecture(path, architecture):
+    result = subprocess.run(
+        ["lipo", str(path), "-verify_arch", architecture],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise SystemExit(
+            f"{path} does not contain the required {architecture} code. "
+            f"{detail}"
+        )
+
+
+def build_paths(architecture):
+    native_dir = PROJECT_ROOT / "build" / "macos-native" / architecture
+    helper = native_dir / "macos_uvc_helper"
+    app_name = (
+        "UOSLabManager.app"
+        if architecture == "arm64"
+        else "UOSLabManager-Intel.app"
+    )
+    app = PROJECT_ROOT / "dist" / app_name
+    archive = (
+        PROJECT_ROOT
+        / "dist"
+        / f"UOSLabManager-macOS-{architecture}.zip"
+    )
+    return native_dir, helper, app, archive
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Build UOSLabManager.app for internal Apple Silicon use."
+        description="Build UOSLabManager.app for internal macOS use."
     )
     parser.add_argument(
         "--d2xx",
         help="Path to FTDI libftd2xx.dylib; mounted images are auto-detected.",
+    )
+    parser.add_argument(
+        "--arch",
+        choices=SUPPORTED_ARCHITECTURES,
+        default=platform.machine(),
+        help="Target architecture (default: the running Python architecture).",
     )
     parser.add_argument(
         "--skip-tests", action="store_true", help="Skip the unittest suite."
@@ -79,15 +114,21 @@ def main(argv=None):
 
     if sys.platform != "darwin":
         raise SystemExit("The macOS app must be built on macOS.")
-    if platform.machine() != "arm64":
+    if platform.machine() != args.arch:
         raise SystemExit(
-            "This build recipe targets Apple Silicon. Build on an arm64 Mac."
+            f"The running Python is {platform.machine()}, but --arch is "
+            f"{args.arch}. Run this script with a {args.arch} Python "
+            "environment. On Apple Silicon, prefix an Intel Python command "
+            "with: arch -x86_64"
         )
 
     require_tool("xcrun")
     require_tool("codesign")
     require_tool("ditto")
+    require_tool("lipo")
     d2xx = find_d2xx(args.d2xx)
+    require_architecture(d2xx, args.arch)
+    native_dir, uvc_helper, app, archive = build_paths(args.arch)
 
     try:
         run([sys.executable, "-m", "PyInstaller", "--version"])
@@ -111,11 +152,13 @@ def main(argv=None):
             ]
         )
 
-    NATIVE_DIR.mkdir(parents=True, exist_ok=True)
+    native_dir.mkdir(parents=True, exist_ok=True)
     run(
         [
             "xcrun",
             "clang",
+            "-arch",
+            args.arch,
             "-std=c11",
             "-Wall",
             "-Wextra",
@@ -123,17 +166,19 @@ def main(argv=None):
             "-O2",
             UVC_SOURCE,
             "-o",
-            UVC_HELPER,
+            uvc_helper,
             "-framework",
             "IOKit",
             "-framework",
             "CoreFoundation",
         ]
     )
+    require_architecture(uvc_helper, args.arch)
 
     build_environment = os.environ.copy()
-    build_environment["CTVIDEO_UVC_HELPER"] = str(UVC_HELPER)
+    build_environment["CTVIDEO_UVC_HELPER"] = str(uvc_helper)
     build_environment["FTD2XX_LIBRARY"] = str(d2xx)
+    build_environment["PYINSTALLER_TARGET_ARCH"] = args.arch
     run(
         [
             sys.executable,
@@ -146,7 +191,7 @@ def main(argv=None):
         env=build_environment,
     )
 
-    run(["codesign", "--force", "--deep", "--sign", "-", APP])
+    run(["codesign", "--force", "--deep", "--sign", "-", app])
     run(
         [
             "codesign",
@@ -154,11 +199,11 @@ def main(argv=None):
             "--deep",
             "--strict",
             "--verbose=2",
-            APP,
+            app,
         ]
     )
 
-    ARCHIVE.unlink(missing_ok=True)
+    archive.unlink(missing_ok=True)
     run(
         [
             "ditto",
@@ -166,14 +211,15 @@ def main(argv=None):
             "-k",
             "--sequesterRsrc",
             "--keepParent",
-            APP,
-            ARCHIVE,
+            app,
+            archive,
         ]
     )
-    digest = hashlib.sha256(ARCHIVE.read_bytes()).hexdigest()
-    print(f"\nBuilt app: {APP}")
-    print(f"Archive:   {ARCHIVE}")
-    print(f"SHA-256:   {digest}")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    print(f"\nArchitecture: {args.arch}")
+    print(f"Built app:   {app}")
+    print(f"Archive:     {archive}")
+    print(f"SHA-256:     {digest}")
     return 0
 
 
