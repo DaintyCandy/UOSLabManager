@@ -24,7 +24,7 @@ S_FALSE = 1
 CLSCTX_INPROC_SERVER = 1
 VFW_S_STATE_INTERMEDIATE = 0x00040237
 KSPROPERTY_TYPE_GET = 0x00000001
-KSPROPERTY_TYPE_BASICSUPPORT = 0x80000000
+KSPROPERTY_TYPE_BASICSUPPORT = 0x00000200
 KSPROPERTY_TYPE_TOPOLOGY = 0x10000000
 
 
@@ -501,6 +501,14 @@ def _probe_filter(filter_pointer):
                                     ks_control, node_id, property_set, property_id,
                                     KSPROPERTY_TYPE_GET,
                                 ),
+                                "node_instance_basic_support": _ks_filter_property(
+                                    node_control, property_set, property_id,
+                                    KSPROPERTY_TYPE_BASICSUPPORT,
+                                ),
+                                "node_instance_current": _ks_filter_property(
+                                    node_control, property_set, property_id,
+                                    KSPROPERTY_TYPE_GET,
+                                ),
                                 "filter_basic_support": _ks_filter_property(
                                     ks_control, property_set, property_id,
                                     KSPROPERTY_TYPE_BASICSUPPORT,
@@ -524,13 +532,17 @@ def probe_port(port: str) -> dict:
         raise RuntimeError("The IKsControl probe is available only on Windows.")
     camera = resolve_camera_for_port(port)
     target_name = camera["CameraName"].strip().casefold()
+    target_path = str(camera.get("CameraDevicePath") or "").strip().casefold()
     ctypes.windll.ole32.CoInitializeEx(None, 0)
     try:
         discovered = []
         selected = None
         for item in _enumerate_video_filters():
             discovered.append({"name": item["name"], "device_path": item["device_path"]})
-            if selected is None and item["name"].strip().casefold() == target_name:
+            item_path = str(item.get("device_path") or "").strip().casefold()
+            path_match = bool(target_path.startswith("\\\\?\\") and item_path == target_path)
+            name_match = item["name"].strip().casefold() == target_name
+            if selected is None and (path_match or (not target_path.startswith("\\\\?\\") and name_match)):
                 selected = item
             else:
                 _release(item["filter"])

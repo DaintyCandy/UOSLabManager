@@ -570,9 +570,10 @@ class HeatingControlPanel(QWidget):
                     f"Camera mapping failed ({camera_error}); "
                     "starting automatic OpenCV source recovery."
                 )
-            self.video_view.start_preview(
-                camera["CameraIndex"], camera["CameraName"]
-            )
+            if not self.video_view.start_preview(
+                camera["CameraIndex"], camera["CameraName"], camera_info=camera
+            ):
+                raise RuntimeError("The CTvideo camera thread did not start.")
             self.log(f"CTvideo 3M connected: {port}")
             self._notify_main()
         except Exception as error:

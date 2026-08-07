@@ -1,3 +1,4 @@
+import threading
 import time
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
@@ -7,36 +8,54 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from plugins.devices.ctvideo_3m.video_display import (
+    CompactConnectVideoDisplaySettings,
+    process_frame,
+)
+
 try:
     import cv2
 except ImportError:
     cv2 = None
 
 
+VIDEO_GAIN_NAME = "CompactConnect Video Gain"
+ANTI_FLICKER_NAME = "CompactConnect Anti-flicker"
+
+
 class CTVideoWorker(QThread):
     frame_ready = pyqtSignal(object)
     video_error = pyqtSignal(str)
-    gain_status = pyqtSignal(str)
-    brightness_status = pyqtSignal(str)
     camera_properties = pyqtSignal(object)
     source_status = pyqtSignal(str)
     source_opened = pyqtSignal(object, str)
+    hardware_status = pyqtSignal(str)
 
-    def __init__(self, source, camera_name, uvc_settings=None, parent=None):
+    def __init__(
+        self, source, camera_name, display_settings=None, camera_info=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.source = source
         self.camera_name = camera_name
-        self._uvc_settings = dict(uvc_settings or {})
-        self._pending_uvc_settings = None
-        self._requested_gain = None
-        self._applied_gain = object()
-        self._requested_brightness = None
-        self._applied_brightness = object()
+        self.camera_info = dict(camera_info or {})
+        self._display_settings = CompactConnectVideoDisplaySettings.from_mapping(
+            display_settings or {}
+        )
+        self._pending_display_settings = None
+        self._pending_video_gain = None
+        self._pending_anti_flicker = None
+        self._read_properties_requested = False
+        self._request_lock = threading.Lock()
+        self._hardware_summary = {}
 
     @staticmethod
     def _backend_candidates(source):
         if not isinstance(source, int):
             return ((cv2.CAP_ANY, "ANY"),)
+        if source >= 0:
+            backend = getattr(cv2, "CAP_DSHOW", None)
+            return ((backend, "DirectShow"),) if backend is not None else ()
         candidates = []
         for attribute, label in (
             ("CAP_DSHOW", "DirectShow"),
@@ -53,13 +72,12 @@ class CTVideoWorker(QThread):
             return (self.source,)
         if self.source < 0:
             return tuple(range(11))
-        return tuple(dict.fromkeys((self.source, *range(11))))
+        return (self.source,)
 
     def _open_capture(self):
         failures = []
         for source in self._source_candidates():
-            backends = self._backend_candidates(source)
-            for backend, backend_name in backends:
+            for backend, backend_name in self._backend_candidates(source):
                 capture = cv2.VideoCapture(source, backend)
                 if not capture.isOpened():
                     failures.append(f"{source}/{backend_name}: open failed")
@@ -80,9 +98,6 @@ class CTVideoWorker(QThread):
                         capture.release()
                         return None, None
                     if attempt == warmup_attempts // 2:
-                        # CTvideo units commonly expose a 640x480 UVC mode;
-                        # requesting it recovers drivers that do not choose a
-                        # valid default media type.
                         try:
                             capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                             capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -108,59 +123,208 @@ class CTVideoWorker(QThread):
             + (f" ({detail})" if detail else "")
         )
 
-    def set_gain(self, gain):
-        self._requested_gain = float(gain)
+    def set_video_display_settings(self, settings):
+        validated = CompactConnectVideoDisplaySettings.from_mapping(settings)
+        with self._request_lock:
+            self._pending_display_settings = validated
 
-    def set_brightness(self, brightness):
-        self._requested_brightness = float(brightness)
+    def set_compactconnect_video_gain(self, value, *, confirmed=False):
+        if confirmed is not True:
+            raise PermissionError(
+                "Queueing a persistent Video Gain write requires confirmed=True."
+            )
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("CompactConnect Video Gain must be an integer.")
+        if not 1 <= value <= 255:
+            raise ValueError("CompactConnect Video Gain must be in range 1..255.")
+        with self._request_lock:
+            self._pending_video_gain = value
 
-    def set_uvc_settings(self, settings):
-        self._pending_uvc_settings = dict(settings)
+    def set_compactconnect_anti_flicker(self, mode, *, confirmed=False):
+        if confirmed is not True:
+            raise PermissionError(
+                "Queueing a persistent Anti-flicker write requires confirmed=True."
+            )
+        if isinstance(mode, bool) or not isinstance(mode, int):
+            raise TypeError("CompactConnect Anti-flicker mode must be an integer.")
+        if mode not in (0, 1, 2):
+            raise ValueError(
+                "CompactConnect Anti-flicker mode must be 0, 1, or 2."
+            )
+        with self._request_lock:
+            self._pending_anti_flicker = mode
 
-    def _camera_properties(self, capture):
-        auto_exposure = capture.get(cv2.CAP_PROP_AUTO_EXPOSURE)
+    def request_camera_properties(self):
+        with self._request_lock:
+            self._read_properties_requested = True
+
+    def _take_requests(self):
+        with self._request_lock:
+            requests = (
+                self._pending_display_settings,
+                self._pending_video_gain,
+                self._pending_anti_flicker,
+                self._read_properties_requested,
+            )
+            self._pending_display_settings = None
+            self._pending_video_gain = None
+            self._pending_anti_flicker = None
+            self._read_properties_requested = False
+        return requests
+
+    def _emit_camera_results(self, results, operation):
+        controls = {item["name"]: item for item in results}
+        self._hardware_summary.update(controls)
+        self.camera_properties.emit({"operation": operation, "controls": controls})
+        parts = []
+        gain = self._hardware_summary.get(VIDEO_GAIN_NAME)
+        if gain is not None:
+            current = gain.get("current")
+            parts.append(
+                "Gain unavailable" if current is None else f"Gain {current}"
+            )
+        anti = self._hardware_summary.get(ANTI_FLICKER_NAME)
+        if anti is not None:
+            parts.append(anti.get("display") or "Anti-flicker unavailable")
+        if parts:
+            self.hardware_status.emit(" | ".join(parts))
+
+    @staticmethod
+    def _read_hardware_controls(controller):
+        results = []
+        try:
+            snapshot = controller.read_compactconnect_video_gain()
+            consistency = (
+                "consistent"
+                if snapshot.internally_consistent else
+                f"complement mismatch ({snapshot.complement})"
+            )
+            results.append({
+                "name": VIDEO_GAIN_NAME,
+                "supported": True,
+                "applied": None,
+                "current": snapshot.value,
+                "minimum": 1,
+                "maximum": 255,
+                "step": 1,
+                "detail": (
+                    "Vendor YTarget at EEPROM 0x0801; "
+                    f"read-back {snapshot.value}, {consistency}"
+                ),
+            })
+        except Exception as error:
+            results.append({
+                "name": VIDEO_GAIN_NAME,
+                "supported": False,
+                "applied": None,
+                "current": None,
+                "minimum": 1,
+                "maximum": 255,
+                "step": 1,
+                "detail": f"Vendor YTarget read unavailable: {error}",
+            })
+        try:
+            snapshot = controller.read_compactconnect_anti_flicker()
+            results.append({
+                "name": ANTI_FLICKER_NAME,
+                "supported": True,
+                "applied": None,
+                "current": (
+                    snapshot.possible_modes[0]
+                    if len(snapshot.possible_modes) == 1 else None
+                ),
+                "raw_current": snapshot.raw_value,
+                "possible_modes": snapshot.possible_modes,
+                "display": snapshot.description,
+                "minimum": 0,
+                "maximum": 2,
+                "step": 1,
+                "detail": (
+                    "CompactConnect Indoor byte at EEPROM 0x083A; "
+                    f"{snapshot.description}. Off and 50 Hz share raw value 25."
+                ),
+            })
+        except Exception as error:
+            results.append({
+                "name": ANTI_FLICKER_NAME,
+                "supported": False,
+                "applied": None,
+                "current": None,
+                "raw_current": None,
+                "possible_modes": (),
+                "display": "Anti-flicker unavailable",
+                "minimum": 0,
+                "maximum": 2,
+                "step": 1,
+                "detail": f"Vendor Anti-flicker read unavailable: {error}",
+            })
+        return results
+
+    @staticmethod
+    def _gain_write_result(written):
         return {
-            "gain_supported": True,
-            "gain": capture.get(cv2.CAP_PROP_GAIN),
-            "gain_min": 0, "gain_max": 4, "gain_step": 1,
-            "brightness_supported": True,
-            "brightness": capture.get(cv2.CAP_PROP_BRIGHTNESS),
-            "brightness_min": -64, "brightness_max": 64, "brightness_step": 1,
-            "exposure_supported": True,
-            "auto_exposure": auto_exposure > 0.5,
-            "auto_exposure_raw": auto_exposure,
+            "name": VIDEO_GAIN_NAME,
+            "supported": written.verified,
+            "applied": written.verified,
+            "requested": written.requested,
+            "current": written.after.value,
+            "minimum": 1,
+            "maximum": 255,
+            "step": 1,
+            "detail": (
+                f"EEPROM YTarget requested={written.requested}, "
+                f"before={written.before.value}, read-back={written.after.value}"
+            ),
         }
 
-    def _apply_gain(self, capture):
-        gain = self._requested_gain
-        if gain is None or gain == self._applied_gain:
-            return
-        try:
-            accepted = capture.set(cv2.CAP_PROP_GAIN, gain)
-            self._applied_gain = gain
-            properties = self._camera_properties(capture)
-            self.camera_properties.emit(properties)
-            text = f"Gain: {properties['gain']:g}" if accepted else "Gain: unsupported"
-            self.gain_status.emit(text)
-        except Exception as error:
-            self.gain_status.emit(f"Gain error: {error}")
+    @staticmethod
+    def _anti_flicker_write_result(written):
+        return {
+            "name": ANTI_FLICKER_NAME,
+            "supported": written.verified,
+            "applied": written.verified,
+            "requested": written.requested_mode,
+            "current": written.requested_mode if written.verified else None,
+            "raw_current": written.after.raw_value,
+            "possible_modes": written.after.possible_modes,
+            "display": written.after.description,
+            "minimum": 0,
+            "maximum": 2,
+            "step": 1,
+            "detail": (
+                f"EEPROM Anti-flicker requested mode={written.requested_mode}, "
+                f"raw={written.requested_raw}, read-back={written.after.raw_value}"
+            ),
+        }
 
-    def _apply_brightness(self, capture):
-        brightness = self._requested_brightness
-        if brightness is None or brightness == self._applied_brightness:
-            return
-        try:
-            accepted = capture.set(cv2.CAP_PROP_BRIGHTNESS, brightness)
-            self._applied_brightness = brightness
-            properties = self._camera_properties(capture)
-            self.camera_properties.emit(properties)
-            text = (
-                f"Brightness: {properties['brightness']:g}"
-                if accepted else "Brightness: unsupported"
-            )
-            self.brightness_status.emit(text)
-        except Exception as error:
-            self.brightness_status.emit(f"Brightness error: {error}")
+    @staticmethod
+    def _hardware_unavailable_results(error):
+        detail = f"CompactConnect vendor controls unavailable: {error}"
+        return [
+            {
+                "name": VIDEO_GAIN_NAME,
+                "supported": False,
+                "applied": None,
+                "current": None,
+                "minimum": 1,
+                "maximum": 255,
+                "step": 1,
+                "detail": detail,
+            },
+            {
+                "name": ANTI_FLICKER_NAME,
+                "supported": False,
+                "applied": None,
+                "current": None,
+                "raw_current": None,
+                "possible_modes": (),
+                "display": "Anti-flicker unavailable",
+                "minimum": 0,
+                "maximum": 2,
+                "step": 1,
+                "detail": detail,
+            },
+        ]
 
     def run(self):
         if cv2 is None:
@@ -173,44 +337,111 @@ class CTVideoWorker(QThread):
             return
         if capture is None:
             return
+
+        controller = None
         try:
-            initializer = None
             try:
-                from plugins.devices.ctvideo_3m.uvc_initializer import UVCInitializer
-                initializer = UVCInitializer(cv2)
-                initialization = initializer.apply(capture, self._uvc_settings)
-                for item in initialization:
-                    state = "OK" if item["applied"] else "SKIP"
-                    self.gain_status.emit(
-                        f"UVC {state} {item['name']} "
-                        f"(E{item['entity']:02X}/S{item['selector']:02X}): {item['detail']}"
-                    )
+                from plugins.devices.ctvideo_3m.compactconnect_camera import (
+                    CompactConnectCameraController,
+                )
+                controller = CompactConnectCameraController.from_camera_info(
+                    self.camera_info
+                )
+                controller.open()
+                results = self._read_hardware_controls(controller)
+                self._emit_camera_results(results, "read")
+                self.source_status.emit(
+                    "CompactConnect camera hardware values read through vendor XU"
+                )
             except Exception as error:
-                # Camera preview must remain available even when optional UVC
-                # property initialization is rejected by the Windows driver.
-                self.gain_status.emit(f"UVC initialization skipped: {error}")
-            properties = self._camera_properties(capture)
-            self.camera_properties.emit(properties)
-            self.gain_status.emit(f"Gain: {properties['gain']:g}")
-            self.brightness_status.emit(f"Brightness: {properties['brightness']:g}")
+                if controller is not None:
+                    try:
+                        controller.close()
+                    except Exception:
+                        pass
+                controller = None
+                self._emit_camera_results(
+                    self._hardware_unavailable_results(error), "read"
+                )
+                self.source_status.emit(str(error))
+
             last_emit = 0.0
             failed_reads = 0
             pending_frame = first_frame
+            process_error_reported = False
             while not self.isInterruptionRequested():
-                if self._pending_uvc_settings is not None:
-                    settings = self._pending_uvc_settings
-                    self._pending_uvc_settings = None
-                    if initializer is not None:
-                        try:
-                            for item in initializer.apply(capture, settings):
-                                state = "OK" if item["applied"] else "SKIP"
-                                self.gain_status.emit(
-                                    f"UVC {state} {item['name']}: {item['detail']}"
-                                )
-                        except Exception as error:
-                            self.gain_status.emit(f"UVC update skipped: {error}")
-                self._apply_gain(capture)
-                self._apply_brightness(capture)
+                (
+                    display_settings,
+                    video_gain,
+                    anti_flicker,
+                    read_requested,
+                ) = self._take_requests()
+                if display_settings is not None:
+                    self._display_settings = display_settings
+                    self.source_status.emit("Video display settings applied")
+
+                if video_gain is not None:
+                    try:
+                        if controller is None:
+                            raise RuntimeError("Vendor camera control is unavailable")
+                        written = controller.set_compactconnect_video_gain(
+                            video_gain, acknowledged=True
+                        )
+                        self._emit_camera_results(
+                            [self._gain_write_result(written)], "video_gain_apply"
+                        )
+                    except Exception as error:
+                        self._emit_camera_results([{
+                            "name": VIDEO_GAIN_NAME,
+                            "supported": False,
+                            "applied": False,
+                            "requested": video_gain,
+                            "current": None,
+                            "minimum": 1,
+                            "maximum": 255,
+                            "step": 1,
+                            "detail": f"EEPROM write failed: {error}",
+                        }], "video_gain_apply")
+                        self.source_status.emit(str(error))
+
+                if anti_flicker is not None:
+                    try:
+                        if controller is None:
+                            raise RuntimeError("Vendor camera control is unavailable")
+                        written = controller.set_compactconnect_anti_flicker(
+                            anti_flicker, acknowledged=True
+                        )
+                        self._emit_camera_results(
+                            [self._anti_flicker_write_result(written)],
+                            "anti_flicker_apply",
+                        )
+                    except Exception as error:
+                        self._emit_camera_results([{
+                            "name": ANTI_FLICKER_NAME,
+                            "supported": False,
+                            "applied": False,
+                            "requested": anti_flicker,
+                            "current": None,
+                            "raw_current": None,
+                            "possible_modes": (),
+                            "display": "Anti-flicker write failed",
+                            "minimum": 0,
+                            "maximum": 2,
+                            "step": 1,
+                            "detail": f"EEPROM write failed: {error}",
+                        }], "anti_flicker_apply")
+                        self.source_status.emit(str(error))
+
+                if read_requested:
+                    results = (
+                        self._read_hardware_controls(controller)
+                        if controller is not None else
+                        self._hardware_unavailable_results(
+                            "Vendor camera control is unavailable"
+                        )
+                    )
+                    self._emit_camera_results(results, "read")
+
                 if pending_frame is not None:
                     frame = pending_frame
                     pending_frame = None
@@ -227,6 +458,15 @@ class CTVideoWorker(QThread):
                     time.sleep(0.05)
                     continue
                 failed_reads = 0
+                try:
+                    frame = process_frame(frame, self._display_settings, cv2)
+                    process_error_reported = False
+                except Exception as error:
+                    if not process_error_reported:
+                        self.source_status.emit(
+                            f"Video display processing skipped: {error}"
+                        )
+                        process_error_reported = True
                 now = time.monotonic()
                 if now - last_emit < 1.0 / 30.0:
                     time.sleep(0.002)
@@ -234,6 +474,11 @@ class CTVideoWorker(QThread):
                 last_emit = now
                 self.frame_ready.emit(frame)
         finally:
+            if controller is not None:
+                try:
+                    controller.close()
+                except Exception:
+                    pass
             capture.release()
 
 
@@ -247,8 +492,12 @@ class CTVideoView(QWidget):
         self.worker = None
         self._session_key = None
         self.source = 0
-        self.gain_text = "Gain: device default"
-        self.brightness_text = "Brightness: device default"
+        self._last_display_settings = (
+            CompactConnectVideoDisplaySettings().to_dict()
+        )
+        self._camera_info = {}
+        self.hardware_text = "Camera values not read"
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         group = QGroupBox("CTvideo 3M Pyrometer Video")
@@ -256,8 +505,12 @@ class CTVideoView(QWidget):
         self.preview = QLabel("CTvideo 3M\nVIDEO STANDBY")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(240, 180)
-        self.preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.preview.setStyleSheet("background:#000; color:#777; border:2px inset #555; font-size:18pt;")
+        self.preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.preview.setStyleSheet(
+            "background:#000; color:#777; border:2px inset #555; font-size:18pt;"
+        )
         self.status = QLabel("Video thread: stopped")
         source_row = QHBoxLayout()
         source_row.addWidget(QLabel("Camera index"))
@@ -275,46 +528,66 @@ class CTVideoView(QWidget):
         body.addWidget(self.status)
         layout.addWidget(group)
 
-    def start_preview(self, source=0, camera_name="", uvc_settings=None):
+    def start_preview(
+        self, source=0, camera_name="", display_settings=None, camera_info=None,
+    ):
         if not self.stop_preview():
             self.status.setText("Video thread: previous worker is still stopping")
-            self.log("CTvideo 3M: preview restart blocked until the previous thread stops")
+            self.log("CTvideo 3M: preview restart blocked until the worker stops")
             return False
         source_text = str(source).strip()
-        source = (
-            int(source_text)
-            if source_text.lstrip("+-").isdigit()
-            else source_text
-        )
+        source = int(source_text) if source_text.lstrip("+-").isdigit() else source_text
         if isinstance(source, int):
             self.source_selector.blockSignals(True)
             self.source_selector.setValue(source)
             self.source_selector.blockSignals(False)
         self.source = source
-        key = (type(source).__name__, source)
+        if display_settings is not None:
+            self._last_display_settings = (
+                CompactConnectVideoDisplaySettings.from_mapping(
+                    display_settings
+                ).to_dict()
+            )
+        if camera_info is not None:
+            self._camera_info = dict(camera_info)
+
+        camera_identity = (
+            self._camera_info.get("CameraDevicePath")
+            or self._camera_info.get("CameraContainerId")
+            or camera_name
+        )
+        key = (
+            type(source).__name__, source,
+            str(camera_identity or "").strip().casefold(),
+        )
         session = self._sessions.get(key)
         if session is None or not session["worker"].isRunning():
             if session is not None:
                 self._sessions.pop(key, None)
-            worker = CTVideoWorker(source, camera_name, uvc_settings)
+            worker = CTVideoWorker(
+                source,
+                camera_name,
+                self._last_display_settings,
+                self._camera_info,
+            )
             session = {"worker": worker, "views": set()}
             self._sessions[key] = session
             start_worker = True
         else:
             worker = session["worker"]
             start_worker = False
-            if uvc_settings:
-                worker.set_uvc_settings(uvc_settings)
+            worker.set_video_display_settings(self._last_display_settings)
+            worker.request_camera_properties()
         self.worker = worker
         self._session_key = key
+        self.hardware_text = "Camera values not read"
         session["views"].add(self)
         self.worker.frame_ready.connect(self.update_frame)
         self.worker.video_error.connect(self.handle_error)
-        self.worker.gain_status.connect(self.handle_gain_status)
-        self.worker.brightness_status.connect(self.handle_brightness_status)
         self.worker.camera_properties.connect(self.forward_camera_properties)
         self.worker.source_status.connect(self.handle_source_status)
         self.worker.source_opened.connect(self.handle_source_opened)
+        self.worker.hardware_status.connect(self.handle_hardware_status)
         self.worker.finished.connect(self.worker_finished)
         self.status.setText(
             f"Video thread: {'starting' if start_worker else 'shared'} ({source})"
@@ -325,7 +598,10 @@ class CTVideoView(QWidget):
 
     def open_selected_source(self):
         self.start_preview(
-            self.source_selector.value(), "Manually selected CTvideo camera"
+            self.source_selector.value(),
+            "Manually selected CTvideo camera",
+            self._last_display_settings,
+            self._camera_info,
         )
 
     def handle_source_opened(self, source, backend_name):
@@ -342,41 +618,64 @@ class CTVideoView(QWidget):
         self.status.setText(message)
         self.log(f"CTvideo 3M: {message}")
 
-    def set_gain(self, gain):
-        if self.worker is not None:
-            self.worker.set_gain(gain)
+    def handle_hardware_status(self, message):
+        self.hardware_text = message
 
-    def set_brightness(self, brightness):
-        if self.worker is not None:
-            self.worker.set_brightness(brightness)
+    def set_video_display_settings(self, settings):
+        self._last_display_settings = (
+            CompactConnectVideoDisplaySettings.from_mapping(settings).to_dict()
+        )
+        if self.worker is None:
+            return False
+        self.worker.set_video_display_settings(self._last_display_settings)
+        return True
 
-    def set_uvc_settings(self, settings):
-        if self.worker is not None:
-            self.worker.set_uvc_settings(settings)
+    def set_compactconnect_video_gain(self, value, *, confirmed=False):
+        if confirmed is not True:
+            raise PermissionError(
+                "Queueing a persistent Video Gain write requires confirmed=True."
+            )
+        if self.worker is None:
+            return False
+        self.worker.set_compactconnect_video_gain(value, confirmed=True)
+        return True
 
-    def handle_gain_status(self, message):
-        self.gain_text = message
-        self.log(f"CTvideo 3M: {message}")
+    def set_compactconnect_anti_flicker(self, mode, *, confirmed=False):
+        if confirmed is not True:
+            raise PermissionError(
+                "Queueing a persistent Anti-flicker write requires confirmed=True."
+            )
+        if self.worker is None:
+            return False
+        self.worker.set_compactconnect_anti_flicker(mode, confirmed=True)
+        return True
 
-    def handle_brightness_status(self, message):
-        self.brightness_text = message
-        self.log(f"CTvideo 3M: {message}")
+    def request_camera_properties(self):
+        if self.worker is None:
+            return False
+        self.worker.request_camera_properties()
+        return True
 
     def stop_preview(self):
         if self.worker is not None:
             worker = self.worker
             key = self._session_key
             session = self._sessions.get(key)
-            self._disconnect_worker(worker)
-            self.worker = None
-            self._session_key = None
             if session is not None and session["worker"] is worker:
-                session["views"].discard(self)
-                if not session["views"]:
+                last_view = session["views"] == {self}
+                if last_view:
                     worker.requestInterruption()
                     if not worker.wait(4000):
+                        self.status.setText("Video thread: waiting for camera to stop")
                         return False
+                self._disconnect_worker(worker)
+                session["views"].discard(self)
+                if last_view:
                     self._sessions.pop(key, None)
+            else:
+                self._disconnect_worker(worker)
+            self.worker = None
+            self._session_key = None
         self.preview.clear()
         self.preview.setText("CTvideo 3M\nVIDEO STANDBY")
         self.status.setText("Video thread: stopped")
@@ -386,11 +685,10 @@ class CTVideoView(QWidget):
         for signal, callback in (
             (worker.frame_ready, self.update_frame),
             (worker.video_error, self.handle_error),
-            (worker.gain_status, self.handle_gain_status),
-            (worker.brightness_status, self.handle_brightness_status),
             (worker.camera_properties, self.forward_camera_properties),
             (worker.source_status, self.handle_source_status),
             (worker.source_opened, self.handle_source_opened),
+            (worker.hardware_status, self.handle_hardware_status),
             (worker.finished, self.worker_finished),
         ):
             try:
@@ -401,15 +699,18 @@ class CTVideoView(QWidget):
     def update_frame(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         height, width = rgb.shape[:2]
-        image = QImage(rgb.data, width, height, 3 * width, QImage.Format.Format_RGB888).copy()
+        image = QImage(
+            rgb.data, width, height, 3 * width,
+            QImage.Format.Format_RGB888,
+        ).copy()
         pixmap = QPixmap.fromImage(image).scaled(
-            self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            self.preview.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         self.preview.setPixmap(pixmap)
         self.status.setText(
-            f"Video thread: running ({width} x {height}) | "
-            f"{self.gain_text} | {self.brightness_text}"
+            f"Video thread: running ({width} x {height}) | {self.hardware_text}"
         )
 
     def handle_error(self, message):
