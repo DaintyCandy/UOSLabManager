@@ -4,6 +4,7 @@ from collections import deque
 from datetime import datetime
 
 import pyqtgraph as pg
+from core import storage_dir
 from core.data_logger import DataLogger
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -268,7 +269,7 @@ class MeasurementPanels:
             QMessageBox.information(self.table, "Save CSV", "No data to save.")
             return
         settings = QSettings("UOSLabManager", "UOSLabManager")
-        default_directory = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        default_directory = str(storage_dir("data"))
         output_directory = settings.value("data/output_dir", default_directory)
         os.makedirs(output_directory, exist_ok=True)
         default_path = os.path.join(output_directory, "experiment_data.csv")

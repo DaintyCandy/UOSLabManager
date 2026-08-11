@@ -341,6 +341,11 @@ class ZUP3612Panel(QWidget):
             self.monitor_labels["actual_output"].setText(
                 f"{state['voltage_V']:.3f} V  |  {state['current_A']:.3f} A"
             )
+            if "set_voltage_V" in state and "set_current_A" in state:
+                self.monitor_labels["set_output"].setText(
+                    f"{state['set_voltage_V']:.2f} V  |  "
+                    f"{state['set_current_A']:.3f} A"
+                )
             self.monitor_labels["state"].setText(
                 f"{state['power_W']:.3f} W  |  {state['mode']}  |  "
                 f"Output {'ON' if state['output_on'] else 'OFF'}"

@@ -4,10 +4,16 @@ import os
 import sys
 from importlib.metadata import PackageNotFoundError, distribution
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.building.datastruct import Tree
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 hiddenimports = []
 hiddenimports += collect_submodules('plugins')
+hiddenimports += collect_submodules('openai_codex')
+codex_datas, codex_binaries, codex_cli_hiddenimports = collect_all(
+    'codex_cli_bin', include_py_files=True
+)
+hiddenimports += codex_cli_hiddenimports
 
 license_packages = (
     'PyQt6', 'PyQt6-sip', 'pyqtgraph', 'pyqtdarktheme', 'pyserial',
@@ -35,9 +41,6 @@ for package_name in license_packages:
             )
             third_party_license_files.append((str(source), destination))
 
-# Conda installs the Qt runtime in Library/bin instead of inside the PyQt6
-# wheel directory expected by PyInstaller's standard hook.  Bundle those DLLs
-# in the layout used by the PyQt6 runtime hook.
 conda_qt_bin = os.path.join(sys.prefix, 'Library', 'bin')
 qt_binaries = [
     (path, 'PyQt6/Qt6/bin')
@@ -48,11 +51,12 @@ qt_binaries = [
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=qt_binaries,
+    binaries=[*qt_binaries, *codex_binaries],
     datas=[
         ('LICENSE', '.'),
         ('THIRD_PARTY_NOTICES.md', '.'),
         *third_party_license_files,
+        *codex_datas,
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -62,25 +66,32 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.datas += Tree('plugins', prefix='plugins', excludes=['__pycache__', '*.pyc'])
 pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='UOSLabManager',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='UOSLabManager',
 )

@@ -1,5 +1,3 @@
-import os
-
 from PyQt6.QtCore import QSettings, QTimer
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -7,6 +5,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .widget_busy_spinner import BusySpinnerDialog
+from core import storage_dir
 
 
 class SettingsPanel(QWidget):
@@ -43,7 +42,7 @@ class SettingsPanel(QWidget):
         data = QGroupBox("Data Table Storage")
         data_form = QFormLayout(data)
         data_path_row = QHBoxLayout()
-        default_data_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        default_data_path = str(storage_dir("data"))
         self.data_path = QLineEdit(self.settings.value("data/output_dir", default_data_path))
         self.data_path.setReadOnly(True)
         data_path_row.addWidget(self.data_path)

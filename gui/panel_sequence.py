@@ -25,6 +25,12 @@ class SequencePanel(QWidget):
         self.ramp_active_flag = False # Ramp가 켜져 있는지 추적
         self.recipe_path = None
         self.recipe_dirty = False
+        self.experiment_plugins = {}
+        self.execute_experiment_action = None
+        self.poll_experiment_action = None
+        self.cancel_experiment_action = None
+        self.pending_experiment_step = None
+        self.active_experiment_steps = {}
 
         self.engine_timer = QTimer()
         self.engine_timer.setInterval(1000)
@@ -61,7 +67,8 @@ class SequencePanel(QWidget):
         input_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
         
         self.dev_combo = QComboBox()
-        self.dev_combo.addItems(["LS331", "K2400", "ZUP36-12"])
+        for device_id in ("LS331", "K2400", "ZUP36-12"):
+            self.dev_combo.addItem(device_id, device_id)
         self.dev_combo.setFixedWidth(70)
         self.dev_combo.currentTextChanged.connect(self.on_dev_changed)
         
@@ -132,7 +139,7 @@ class SequencePanel(QWidget):
         self.on_dev_changed()
 
     def on_dev_changed(self):
-        dev = self.dev_combo.currentText()
+        dev = self.dev_combo.currentData() or self.dev_combo.currentText()
         self.cmd_combo.clear()
         if dev == "LS331":
             # "Wait for Temp" 삭제 (Set Temp에 통합됨)
@@ -141,10 +148,47 @@ class SequencePanel(QWidget):
             self.cmd_combo.addItems(["Set Voltage", "Output On", "Output Off"])
         elif dev == "ZUP36-12":
             self.cmd_combo.addItems(["Set Volt", "Set Amp", "Set OVP", "Set UVP", "Output On", "Output Off"])
+        elif isinstance(dev, str) and dev.startswith("experiment:"):
+            plugin = self.experiment_plugins.get(dev.partition(":")[2])
+            if plugin is not None:
+                for command in plugin.sequence_commands:
+                    self.cmd_combo.addItem(command.label, command.key)
+
+    def set_experiment_plugins(
+        self, plugins, execute_callback=None, poll_callback=None,
+        cancel_callback=None,
+    ):
+        current = self.dev_combo.currentData()
+        self.experiment_plugins = dict(plugins)
+        while self.dev_combo.count() > 3:
+            self.dev_combo.removeItem(3)
+        for plugin_id, plugin in self.experiment_plugins.items():
+            if plugin.sequence_commands:
+                self.dev_combo.addItem(plugin.display_name, f"experiment:{plugin_id}")
+        self.execute_experiment_action = execute_callback or self.execute_experiment_action
+        self.poll_experiment_action = poll_callback or self.poll_experiment_action
+        self.cancel_experiment_action = cancel_callback or self.cancel_experiment_action
+        index = self.dev_combo.findData(current)
+        self.dev_combo.setCurrentIndex(index if index >= 0 else 0)
 
     def on_cmd_changed(self):
-        cmd = self.cmd_combo.currentText()
-        dev = self.dev_combo.currentText()
+        cmd = self.cmd_combo.currentData() or self.cmd_combo.currentText()
+        dev = self.dev_combo.currentData() or self.dev_combo.currentText()
+        if isinstance(dev, str) and dev.startswith("experiment:"):
+            plugin = self.experiment_plugins.get(dev.partition(":")[2])
+            action = next(
+                (item for item in plugin.sequence_commands if item.key == cmd), None
+            ) if plugin is not None else None
+            if action is None:
+                return
+            self.val_stack.setCurrentIndex(0)
+            self.val_stack.setVisible(action.requires_value)
+            self.unit_label.setVisible(action.requires_value)
+            self.val_spin.setRange(action.minimum, action.maximum)
+            self.val_spin.setDecimals(action.decimals)
+            self.val_spin.setValue(action.default)
+            self.unit_label.setText(action.unit)
+            return
         
         no_val_cmds = ["Output On", "Output Off", "Ramp Off"]
         needs_input = cmd not in no_val_cmds
@@ -167,10 +211,17 @@ class SequencePanel(QWidget):
                 self.val_spin.setRange(0, 12.0 if "Amp" in cmd else 36.0)
 
     def add_to_stack(self):
-        dev = self.dev_combo.currentText()
-        cmd = self.cmd_combo.currentText()
+        dev = self.dev_combo.currentData() or self.dev_combo.currentText()
+        cmd = self.cmd_combo.currentData() or self.cmd_combo.currentText()
+        experiment_action = isinstance(dev, str) and dev.startswith("experiment:")
+        action = None
+        if experiment_action:
+            plugin = self.experiment_plugins.get(dev.partition(":")[2])
+            action = next(
+                (item for item in plugin.sequence_commands if item.key == cmd), None
+            ) if plugin is not None else None
         
-        if cmd in ["Output On", "Output Off", "Ramp Off"]:
+        if (action is not None and not action.requires_value) or cmd in ["Output On", "Output Off", "Ramp Off"]:
             val, disp_val, arrow = 0, "", ""
         elif cmd == "Heater":
             val = self.heater_combo.currentIndex()
@@ -181,7 +232,9 @@ class SequencePanel(QWidget):
             disp_val = f"{val} {self.unit_label.text()}".strip()
             arrow = " -> "
 
-        step_text = f"{self.list_widget.count() + 1}. [{dev}] {cmd}{arrow}{disp_val}"
+        dev_label = self.dev_combo.currentText()
+        cmd_label = self.cmd_combo.currentText()
+        step_text = f"{self.list_widget.count() + 1}. [{dev_label}] {cmd_label}{arrow}{disp_val}"
         step_data = {'dev': dev, 'cmd': cmd, 'val': val}
         
         item = QListWidgetItem(step_text)
@@ -331,6 +384,18 @@ class SequencePanel(QWidget):
             if not isinstance(step, dict):
                 raise ValueError(f"Step {index} must be an object.")
             device, command, value = step.get("dev"), step.get("cmd"), step.get("val")
+            if isinstance(device, str) and device.startswith("experiment:"):
+                plugin = self.experiment_plugins.get(device.partition(":")[2])
+                action = next(
+                    (item for item in plugin.sequence_commands if item.key == command),
+                    None,
+                ) if plugin is not None else None
+                if action is None:
+                    raise ValueError(f"Step {index} contains an unavailable experiment command.")
+                if action.requires_value and not isinstance(value, (int, float)):
+                    raise ValueError(f"Step {index} value must be numeric.")
+                validated.append({"dev": device, "cmd": command, "val": value})
+                continue
             if device not in allowed or command not in allowed[device]:
                 raise ValueError(f"Step {index} contains an unsupported device or command.")
             if not isinstance(value, (int, float)):
@@ -343,6 +408,24 @@ class SequencePanel(QWidget):
     def add_recipe_item(self, step):
         index = self.list_widget.count() + 1
         device, command, value = step["dev"], step["cmd"], step["val"]
+        if isinstance(device, str) and device.startswith("experiment:"):
+            plugin = self.experiment_plugins.get(device.partition(":")[2])
+            action = next(
+                (item for item in plugin.sequence_commands if item.key == command),
+                None,
+            ) if plugin is not None else None
+            device_label = plugin.display_name if plugin is not None else device
+            command_label = action.label if action is not None else command
+            display = (
+                f" -> {value:g} {action.unit}".rstrip()
+                if action is not None and action.requires_value else ""
+            )
+            item = QListWidgetItem(
+                f"{index}. [{device_label}] {command_label}{display}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, dict(step))
+            self.list_widget.addItem(item)
+            return
         if command in {"Output On", "Output Off", "Ramp Off"}:
             display = ""
         elif command == "Heater":
@@ -364,6 +447,7 @@ class SequencePanel(QWidget):
             
             self.is_running = True
             self.current_step_idx = 0
+            self.active_experiment_steps = {}
             self.state = "NEXT"
             self.ramp_active_flag = False
             self.exec_btn.setText("Stop ⏹")
@@ -373,6 +457,15 @@ class SequencePanel(QWidget):
             self.finish_seq("Aborted.")
 
     def finish_seq(self, msg):
+        if msg != "Sequence Complete." and self.active_experiment_steps:
+            if self.cancel_experiment_action is not None:
+                for step in self.active_experiment_steps.values():
+                    try:
+                        self.cancel_experiment_action(step)
+                    except Exception as error:
+                        self.log(f"Experiment cancel warning: {error}")
+        self.pending_experiment_step = None
+        self.active_experiment_steps = {}
         self.is_running = False
         self.engine_timer.stop()
         self.exec_btn.setText("Execute ▶")
@@ -389,6 +482,24 @@ class SequencePanel(QWidget):
             item = self.list_widget.item(self.current_step_idx)
             self.list_widget.setCurrentRow(self.current_step_idx)
             step = item.data(Qt.ItemDataRole.UserRole)
+
+            if isinstance(step.get('dev'), str) and step['dev'].startswith("experiment:"):
+                if self.execute_experiment_action is None:
+                    self.finish_seq("Error: experiment sequence actions are unavailable.")
+                    return
+                try:
+                    complete = self.execute_experiment_action(step)
+                except Exception as error:
+                    self.finish_seq(f"Experiment error: {error}")
+                    return
+                self.active_experiment_steps[step["dev"]] = dict(step)
+                self.pending_experiment_step = dict(step)
+                if complete:
+                    self.pending_experiment_step = None
+                    self.go_next()
+                else:
+                    self.state = "WAIT_FOR_EXPERIMENT"
+                return
             
             dev_name = "ZUP" if step['dev'] == "ZUP36-12" else step['dev']
             dev = self.manager.get_device(dev_name)
@@ -448,6 +559,14 @@ class SequencePanel(QWidget):
             
         elif self.state == "WAIT_FOR_TIME":
             if time.time() >= self.wait_until: self.go_next()
+
+        elif self.state == "WAIT_FOR_EXPERIMENT":
+            try:
+                if self.poll_experiment_action(self.pending_experiment_step):
+                    self.pending_experiment_step = None
+                    self.go_next()
+            except Exception as error:
+                self.finish_seq(f"Experiment error: {error}")
 
     def go_next(self):
         self.current_step_idx += 1

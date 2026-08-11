@@ -1,0 +1,548 @@
+{
+  "schema": "openai.presentation.layout/v4",
+  "unit": "px",
+  "slide": {
+    "aid": "sl/d4ht1m",
+    "id": "d4ht1m",
+    "slide": 1,
+    "layoutId": "abc01a9f-774c-41f6-9751-06ef0bada4b2",
+    "layoutName": "Title Slide",
+    "layoutType": "title",
+    "masterLayoutId": "08f29e23-89ea-46f7-8e40-1711b4d5ebae",
+    "masterLayoutName": "Master",
+    "frame": {
+      "left": 0,
+      "top": 0,
+      "width": 1280,
+      "height": 720
+    }
+  },
+  "theme": {
+    "colorSchemeName": "ChatGPT",
+    "colors": {
+      "accent1": "#156082",
+      "accent2": "#E97132",
+      "accent3": "#196B24",
+      "accent4": "#0F9ED5",
+      "accent5": "#A02B93",
+      "accent6": "#4EA72E",
+      "bg1": "#FFFFFF",
+      "bg2": "#000000",
+      "tx1": "#1F1F1F",
+      "tx2": "#FFFFFF",
+      "dk1": "#000000",
+      "lt1": "#FFFFFF",
+      "dk2": "#0E2841",
+      "lt2": "#E8E8E8",
+      "hlink": "#467886",
+      "folHlink": "#96607D"
+    },
+    "typefaces": [
+      "Helvetica Neue",
+      "Malgun Gothic"
+    ]
+  },
+  "inheritedLayers": [
+    {
+      "scope": "layout",
+      "id": "abc01a9f-774c-41f6-9751-06ef0bada4b2",
+      "name": "Title Slide",
+      "type": "title",
+      "parentLayoutId": "08f29e23-89ea-46f7-8e40-1711b4d5ebae",
+      "elements": []
+    },
+    {
+      "scope": "master",
+      "id": "08f29e23-89ea-46f7-8e40-1711b4d5ebae",
+      "name": "Master",
+      "type": "master",
+      "elements": []
+    }
+  ],
+  "elements": [
+    {
+      "order": 1,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/8nmpob6l",
+      "id": "1",
+      "name": "Title-3-1",
+      "bbox": [
+        41.33,
+        182.55,
+        992,
+        261.57
+      ],
+      "composeSource": {
+        "run": 1,
+        "path": "0.0"
+      },
+      "geometry": "rect",
+      "text": "프로그램 분석과\n개선 로드맵",
+      "textPreview": "프로그램 분석과 | 개선 로드맵",
+      "resolvedFontSize": 80,
+      "resolvedTextStyle": {
+        "anchor": 3,
+        "fontSize": 80,
+        "typeface": "Helvetica Neue",
+        "color": "#000000",
+        "alignment": "left",
+        "verticalAlignment": "bottom",
+        "autoFit": "none",
+        "insets": {
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        }
+      },
+      "textLayout": {
+        "lineCount": 2,
+        "lines": [
+          {
+            "index": 1,
+            "text": "프로그램 분석과"
+          },
+          {
+            "index": 2,
+            "text": "개선 로드맵"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "프로그램 분석과\n개선 로드맵",
+          "lineSpacingPercent": 93000,
+          "spaceAfter": 520,
+          "resolvedTextStyle": {
+            "anchor": 3,
+            "fontSize": 80,
+            "typeface": "Helvetica Neue",
+            "color": "#000000",
+            "alignment": "left",
+            "verticalAlignment": "bottom",
+            "autoFit": "none",
+            "insets": {
+              "top": 0,
+              "right": 0,
+              "bottom": 0,
+              "left": 0
+            }
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "프로그램 분석과\n개선 로드맵",
+              "fontSize": 74,
+              "typeface": "Malgun Gothic",
+              "color": "#000000",
+              "bold": true
+            }
+          ],
+          "marginLeft": 0
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/7md8vqp0",
+      "id": "2",
+      "name": "Subtitle-4-2",
+      "bbox": [
+        41.33,
+        497.87,
+        598.67,
+        113.41
+      ],
+      "composeSource": {
+        "run": 1,
+        "path": "0.1"
+      },
+      "geometry": "rect",
+      "text": "실험실 장비 통합에서\n안전한 AI 실험 운영 플랫폼으로",
+      "textPreview": "실험실 장비 통합에서 | 안전한 AI 실험 운영 플랫폼으로",
+      "resolvedFontSize": 32,
+      "resolvedTextStyle": {
+        "fontSize": 32,
+        "typeface": "Helvetica Neue",
+        "color": "#000000",
+        "alignment": "left",
+        "autoFit": "none",
+        "insets": {
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        }
+      },
+      "textLayout": {
+        "lineCount": 2,
+        "lines": [
+          {
+            "index": 1,
+            "text": "실험실 장비 통합에서"
+          },
+          {
+            "index": 2,
+            "text": "안전한 AI 실험 운영 플랫폼으로"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "실험실 장비 통합에서\n안전한 AI 실험 운영 플랫폼으로",
+          "lineSpacingPercent": 108000,
+          "spaceAfter": 520,
+          "resolvedTextStyle": {
+            "fontSize": 32,
+            "typeface": "Helvetica Neue",
+            "color": "#000000",
+            "alignment": "left",
+            "autoFit": "none",
+            "insets": {
+              "top": 0,
+              "right": 0,
+              "bottom": 0,
+              "left": 0
+            }
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "실험실 장비 통합에서\n안전한 AI 실험 운영 플랫폼으로",
+              "fontSize": 26,
+              "typeface": "Malgun Gothic",
+              "color": "#475569"
+            }
+          ],
+          "marginLeft": 0
+        }
+      ]
+    },
+    {
+      "order": 3,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/ml47mlof",
+      "id": "3",
+      "name": "Subtitle-4-3",
+      "bbox": [
+        41.33,
+        41.18,
+        598.67,
+        68.15
+      ],
+      "composeSource": {
+        "run": 1,
+        "path": "0.2"
+      },
+      "geometry": "rect",
+      "text": "UOSLabManager",
+      "textPreview": "UOSLabManager",
+      "resolvedFontSize": 32,
+      "resolvedTextStyle": {
+        "fontSize": 32,
+        "typeface": "Helvetica Neue",
+        "color": "#000000",
+        "alignment": "left",
+        "autoFit": "none",
+        "insets": {
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        }
+      },
+      "textLayout": {
+        "lineCount": 1,
+        "lines": [
+          {
+            "index": 1,
+            "text": "UOSLabManager"
+          }
+        ]
+      },
+      "paragraphs": [
+        {
+          "index": 1,
+          "text": "UOSLabManager",
+          "lineSpacingPercent": 112000,
+          "spaceAfter": 520,
+          "resolvedTextStyle": {
+            "fontSize": 32,
+            "typeface": "Helvetica Neue",
+            "color": "#000000",
+            "alignment": "left",
+            "autoFit": "none",
+            "insets": {
+              "top": 0,
+              "right": 0,
+              "bottom": 0,
+              "left": 0
+            }
+          },
+          "runs": [
+            {
+              "index": 1,
+              "text": "UOSLabManager",
+              "fontSize": 24,
+              "typeface": "Malgun Gothic",
+              "color": "#000000",
+              "bold": true
+            }
+          ],
+          "marginLeft": 0
+        }
+      ]
+    },
+    {
+      "order": 4,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/hcfq1072",
+      "id": "4",
+      "name": "cover-accent",
+      "bbox": [
+        1120,
+        0,
+        160,
+        720
+      ],
+      "geometry": "rect",
+      "fillColor": "#EAF5FB",
+      "lineWidth": 0
+    },
+    {
+      "order": 5,
+      "kind": "shape",
+      "scope": "slide",
+      "aid": "sh/wr6psv6x",
+      "id": "5",
+      "name": "cover-accent-strong",
+      "bbox": [
+        1248,
+        0,
+        32,
+        720
+      ],
+      "geometry": "rect",
+      "fillColor": "#3D8DFF",
+      "lineWidth": 0
+    }
+  ],
+  "composeRuns": [
+    {
+      "index": 1,
+      "frame": {
+        "left": 0,
+        "top": 0,
+        "width": 1280,
+        "height": 720
+      },
+      "baseUnit": 1,
+      "root": {
+        "path": "0",
+        "kind": "layers",
+        "name": "codex-grid-layout-library#slide-01",
+        "requestedSize": {
+          "width": {
+            "mode": "fill",
+            "value": 1
+          },
+          "height": {
+            "mode": "fill",
+            "value": 1
+          }
+        },
+        "intrinsicSize": {
+          "width": 1033.33,
+          "height": 611.28
+        },
+        "frame": {
+          "left": 0,
+          "top": 0,
+          "width": 1280,
+          "height": 720
+        },
+        "children": [
+          {
+            "path": "0.0",
+            "kind": "text",
+            "name": "Title-3-1",
+            "position": {
+              "left": 41.33,
+              "top": 182.55
+            },
+            "requestedSize": {
+              "width": {
+                "mode": "fixed",
+                "value": 992
+              },
+              "height": {
+                "mode": "fixed",
+                "value": 261.57
+              }
+            },
+            "intrinsicSize": {
+              "width": 992,
+              "height": 261.57
+            },
+            "frame": {
+              "left": 41.33,
+              "top": 182.55,
+              "width": 992,
+              "height": 261.57
+            },
+            "snappedFrame": {
+              "left": 41.33,
+              "top": 182.55,
+              "width": 992,
+              "height": 261.57
+            },
+            "children": [],
+            "text": "프로그램 분석과\n개선 로드맵",
+            "transform": "none",
+            "element": {
+              "aid": "sh/8nmpob6l",
+              "id": "1",
+              "kind": "shape"
+            }
+          },
+          {
+            "path": "0.1",
+            "kind": "text",
+            "name": "Subtitle-4-2",
+            "position": {
+              "left": 41.33,
+              "top": 497.87
+            },
+            "requestedSize": {
+              "width": {
+                "mode": "fixed",
+                "value": 598.67
+              },
+              "height": {
+                "mode": "fixed",
+                "value": 113.41
+              }
+            },
+            "intrinsicSize": {
+              "width": 598.67,
+              "height": 113.41
+            },
+            "frame": {
+              "left": 41.33,
+              "top": 497.87,
+              "width": 598.67,
+              "height": 113.41
+            },
+            "snappedFrame": {
+              "left": 41.33,
+              "top": 497.87,
+              "width": 598.67,
+              "height": 113.41
+            },
+            "children": [],
+            "text": "실험실 장비 통합에서\n안전한 AI 실험 운영 플랫폼으로",
+            "transform": "none",
+            "element": {
+              "aid": "sh/7md8vqp0",
+              "id": "2",
+              "kind": "shape"
+            }
+          },
+          {
+            "path": "0.2",
+            "kind": "text",
+            "name": "Subtitle-4-3",
+            "position": {
+              "left": 41.33,
+              "top": 41.18
+            },
+            "requestedSize": {
+              "width": {
+                "mode": "fixed",
+                "value": 598.67
+              },
+              "height": {
+                "mode": "fixed",
+                "value": 68.15
+              }
+            },
+            "intrinsicSize": {
+              "width": 598.67,
+              "height": 68.15
+            },
+            "frame": {
+              "left": 41.33,
+              "top": 41.18,
+              "width": 598.67,
+              "height": 68.15
+            },
+            "snappedFrame": {
+              "left": 41.33,
+              "top": 41.18,
+              "width": 598.67,
+              "height": 68.15
+            },
+            "children": [],
+            "text": "UOSLabManager",
+            "transform": "none",
+            "element": {
+              "aid": "sh/ml47mlof",
+              "id": "3",
+              "kind": "shape"
+            }
+          }
+        ],
+        "padding": {
+          "top": 0,
+          "right": 0,
+          "bottom": 0,
+          "left": 0
+        },
+        "alignItems": "stretch",
+        "justifyItems": "stretch",
+        "contentFrame": {
+          "left": 0,
+          "top": 0,
+          "width": 1280,
+          "height": 720
+        },
+        "items": [
+          {
+            "path": "0.0",
+            "frame": {
+              "left": 41.33,
+              "top": 182.55,
+              "width": 992,
+              "height": 261.57
+            }
+          },
+          {
+            "path": "0.1",
+            "frame": {
+              "left": 41.33,
+              "top": 497.87,
+              "width": 598.67,
+              "height": 113.41
+            }
+          },
+          {
+            "path": "0.2",
+            "frame": {
+              "left": 41.33,
+              "top": 41.18,
+              "width": 598.67,
+              "height": 68.15
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

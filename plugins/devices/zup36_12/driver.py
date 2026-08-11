@@ -119,6 +119,10 @@ class ZUP36_12:
     def get_model(self) -> str:
         return self.model
 
+    def get_port(self) -> str:
+        """Return the port used by the shared device instance."""
+        return str(self.ser.port)
+
     def get_identification_error(self) -> str:
         return self.identification_error
 
@@ -198,6 +202,8 @@ class ZUP36_12:
             "voltage_V": voltage,
             "current_A": current,
             "power_W": voltage * current,
+            "set_voltage_V": status["set_voltage"],
+            "set_current_A": status["set_current"],
             "mode": "CC" if operational[0] == "1" else "CV",
             "output_on": operational[3] == "1",
             "ovp_fault": alarm[0] == "1",

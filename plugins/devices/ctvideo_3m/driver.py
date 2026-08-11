@@ -109,6 +109,10 @@ class CTVideo3M:
             if self.ser and self.ser.is_open:
                 self.ser.close()
 
+    def get_port(self) -> str:
+        """Return the port used by the shared device instance."""
+        return str(self.ser.port)
+
     def _read_exactly(self, size: int) -> bytes:
         data = self.ser.read(size)
         if len(data) != size:
