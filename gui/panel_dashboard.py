@@ -78,6 +78,29 @@ class DashboardPanel(QWidget):
         layout.addWidget(self.experiment_list)
         return group
 
+    def set_experiment_plugins(self, experiment_plugins):
+        self.experiment_plugins = experiment_plugins
+        self.experiment_items.clear()
+        self.experiment_list.clear()
+        for experiment_id, plugin in self.experiment_plugins.items():
+            item = QListWidgetItem(plugin.display_name)
+            item.setData(Qt.ItemDataRole.UserRole, experiment_id)
+            item.setToolTip(plugin.description)
+            self.experiment_list.addItem(item)
+            self.experiment_items[experiment_id] = item
+        self.set_active_experiment(self.active_experiment_id)
+
+    def set_device_plugins(self, device_plugins):
+        self.plugins = device_plugins
+        self.device_items.clear()
+        self.device_list.clear()
+        for device_id, plugin in self.plugins.items():
+            item = QListWidgetItem(plugin.display_name)
+            item.setData(Qt.ItemDataRole.UserRole, device_id)
+            self.device_list.addItem(item)
+            self.device_items[device_id] = item
+        self.refresh_devices()
+
     def refresh(self):
         self.refresh_devices()
 
@@ -89,6 +112,8 @@ class DashboardPanel(QWidget):
             item.setForeground(QBrush(QColor("#2ecc71" if connected else "#808080")))
 
     def set_active_experiment(self, experiment_id):
+        if experiment_id not in self.experiment_plugins:
+            experiment_id = None
         self.active_experiment_id = experiment_id
         for item_id, item in self.experiment_items.items():
             active = item_id == experiment_id

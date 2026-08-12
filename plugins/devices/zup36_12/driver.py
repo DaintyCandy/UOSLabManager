@@ -56,43 +56,72 @@ class ZUP36_12:
 
     def close(self):
         if self.ser and self.ser.is_open:
-            self.output_off()
-            self.ser.close()
+            try:
+                for method, value in (
+                    (self.output_off, None),
+                    (self.set_voltage, 0.0),
+                    (self.set_current, 0.0),
+                ):
+                    try:
+                        method() if value is None else method(value)
+                    except Exception:
+                        pass
+            finally:
+                self.ser.close()
 
-    def _frame(self, command: str) -> str:
+    @staticmethod
+    def _normalize_command(command: str) -> str:
         command = str(command).strip()
         if not command:
             raise ValueError("ZUP command cannot be empty")
         if not command.endswith(";"):
             command += ";"
-        if command.startswith(":ADR"):
-            return command
-        return f":ADR{self.address:02d};{command}"
+        return command
 
-    def write(self, command: str):
-        frame = self._frame(command)
-        for character in frame:
+    def _write_characters(self, text: str):
+        for character in text:
             self.ser.write(character.encode("ascii"))
             self.ser.flush()
             if self.character_delay:
                 time.sleep(self.character_delay)
+
+    def write(self, command: str):
+        command = self._normalize_command(command)
+        if command.startswith(":ADR"):
+            self._write_characters(command)
+            time.sleep(0.030)
+        else:
+            # The ZUP protocol requires a pause before ADR and an additional
+            # 30 ms after the address before the actual command is sent.
+            time.sleep(0.010)
+            self._write_characters(f":ADR{self.address:02d};")
+            time.sleep(0.030)
+            self._write_characters(command)
         if self.command_delay:
             time.sleep(self.command_delay)
 
-    def query(self, command: str) -> str:
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        self.write(command)
-        raw = self.ser.read_until(b"\n")
-        if not raw:
-            raise TimeoutError(f"No response to {command}")
-        return raw.decode("ascii", errors="replace").strip()
+    def query(self, command: str, attempts: int = 1) -> str:
+        command = self._normalize_command(command)
+        attempts = max(1, int(attempts))
+        for attempt in range(attempts):
+            self.ser.reset_input_buffer()
+            self.write(command)
+            raw = self.ser.read_until(b"\n")
+            if raw:
+                return raw.decode("ascii", errors="replace").strip()
+            if attempt + 1 < attempts:
+                time.sleep(0.050)
+        raise TimeoutError(f"No response to {command} after {attempts} attempts")
 
     def identify(self) -> str:
-        return self.query(":MDL?;")
+        return self.query(":MDL?;", attempts=2)
 
     def get_model(self) -> str:
         return self.model
+
+    def get_port(self) -> str:
+        """Return the port used by the shared device instance."""
+        return str(self.ser.port)
 
     def get_identification_error(self) -> str:
         return self.identification_error
@@ -160,7 +189,7 @@ class ZUP36_12:
             raise ValueError(f"Invalid numeric value in STT response: {response!r}") from error
 
     def read_complete_status(self):
-        return self.parse_complete_status(self.query(":STT?;"))
+        return self.parse_complete_status(self.query(":STT?;", attempts=3))
 
     def read_monitoring(self):
         status = self.read_complete_status()
@@ -173,6 +202,8 @@ class ZUP36_12:
             "voltage_V": voltage,
             "current_A": current,
             "power_W": voltage * current,
+            "set_voltage_V": status["set_voltage"],
+            "set_current_A": status["set_current"],
             "mode": "CC" if operational[0] == "1" else "CV",
             "output_on": operational[3] == "1",
             "ovp_fault": alarm[0] == "1",

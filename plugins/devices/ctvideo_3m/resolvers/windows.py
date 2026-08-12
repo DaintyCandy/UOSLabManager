@@ -76,6 +76,34 @@ def _is_capture_camera(device):
     return "ir camera" not in str(device["friendly_name"]).lower()
 
 
+def _directshow_camera(camera):
+    try:
+        from ..ks_probe import enumerate_video_inputs
+
+        inputs = enumerate_video_inputs()
+    except Exception:
+        return None
+    name = str(camera["friendly_name"] or "").strip().casefold()
+    instance_tokens = [
+        token.casefold()
+        for token in str(camera["instance_id"] or "").split("\\")
+        if token
+    ]
+    candidates = [
+        item for item in inputs
+        if str(item.get("name") or "").strip().casefold() == name
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: sum(
+            token in str(item.get("device_path") or "").casefold()
+            for token in instance_tokens
+        ),
+    )
+
+
 def resolve_camera(port: str) -> dict:
     port = str(port).strip().upper()
     if not port:
@@ -105,11 +133,19 @@ def resolve_camera(port: str) -> dict:
     )
     if camera is None:
         raise RuntimeError(f"No camera has Container ID {container_id} ({port})")
-    capture_cameras = [device for device in cameras if _is_capture_camera(device)]
-    try:
-        camera_index = capture_cameras.index(camera)
-    except ValueError as error:
-        raise RuntimeError("The Container-ID camera is not exposed as an OpenCV capture device.") from error
+    directshow = _directshow_camera(camera)
+    if directshow is not None:
+        camera_index = directshow["index"]
+        camera_path = directshow["device_path"]
+        index_source = "DirectShow"
+    else:
+        capture_cameras = [device for device in cameras if _is_capture_camera(device)]
+        try:
+            camera_index = capture_cameras.index(camera)
+        except ValueError as error:
+            raise RuntimeError("The Container-ID camera is not exposed as an OpenCV capture device.") from error
+        camera_path = f"PnP camera index {camera_index}"
+        index_source = "Registry fallback"
     return {
         "PortName": port,
         "PortFriendlyName": serial["friendly_name"],
@@ -119,5 +155,6 @@ def resolve_camera(port: str) -> dict:
         "CameraName": camera["friendly_name"],
         "CameraInstanceId": camera["instance_id"],
         "CameraContainerId": camera["container_id"],
-        "CameraDevicePath": f"PnP camera index {camera_index}",
+        "CameraDevicePath": camera_path,
+        "CameraIndexSource": index_source,
     }

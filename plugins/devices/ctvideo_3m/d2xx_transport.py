@@ -173,6 +173,7 @@ class D2XXSerialAdapter:
         device = self._select_device(selector)
         self.serial_number = device["serial_number"]
         self.description = device["description"]
+        self.port = f"d2xx://{self.serial_number}"
         encoded_serial = self.serial_number.encode("ascii")
         self._call(
             "FT_OpenEx",

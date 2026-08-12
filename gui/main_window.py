@@ -1,19 +1,25 @@
 import os
+import sys
 from datetime import datetime
+from pathlib import Path
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
-    QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSplitter,
-    QSizePolicy, QTabBar, QTabWidget, QToolButton, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QPushButton, QScrollArea, QSplitter, QSizePolicy, QTabBar, QTabWidget,
+    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
 )
 
-from core import DeviceManager, load_device_plugins, load_experiment_plugins
+from core import (
+    DeviceManager, load_device_plugins, load_experiment_plugins, storage_dir,
+)
 from .panel_dashboard import DashboardPanel
 from .panel_camera import CameraWorkspace
 from .panel_measurement import MeasurementPanels
 from .panel_sequence import SequencePanel
 from .panel_settings import SettingsPanel
+from .plugin_studio import PluginStudioPanel
 
 __all__ = ["MainWindow"]
 
@@ -29,20 +35,77 @@ class MainWindow(QMainWindow):
         self.window_settings = QSettings("UOSLabManager", "UOSLabManager")
         self.manager = DeviceManager()
         self.plugins = load_device_plugins()
-        self.experiment_plugins = load_experiment_plugins()
+        self.experiment_plugins = load_experiment_plugins(strict=False)
         self.device_tabs = {}
         self.device_tab_containers = {}
         self.experiment_tabs = {}
         self.experiment_tab_containers = {}
         self.settings_panel = None
         self._build_ui()
+        self._build_legal_menu()
+
+    def _build_legal_menu(self):
+        help_menu = self.menuBar().addMenu("Help")
+        about_action = QAction("About UOSLabManager", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+        license_action = QAction("License and third-party notices", self)
+        license_action.triggered.connect(self.show_licenses)
+        help_menu.addAction(license_action)
+
+    def show_about(self, _checked=False):
+        QMessageBox.about(
+            self,
+            "About UOSLabManager",
+            "<h3>UOSLabManager</h3>"
+            "<p>Copyright &copy; 2026 UOSLabManager contributors.</p>"
+            "<p>Free software licensed under "
+            "<b>GNU GPL version 3 or later</b>.</p>"
+            "<p>This program comes with absolutely no warranty. "
+            "See Help &gt; License and third-party notices for details.</p>"
+            "<p>Independent interoperability project; not affiliated with "
+            "or endorsed by equipment manufacturers.</p>"
+            '<p>Source: <a href="https://github.com/DaintyCandy/UOSLabManager">'
+            "github.com/DaintyCandy/UOSLabManager</a></p>",
+        )
+
+    @staticmethod
+    def _legal_resource(name):
+        root = Path(
+            getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])
+        )
+        return root / name
+
+    def show_licenses(self, _checked=False):
+        sections = []
+        for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
+            path = self._legal_resource(name)
+            try:
+                contents = path.read_text(encoding="utf-8")
+            except OSError as error:
+                contents = f"Could not load {name}: {error}"
+            sections.append(f"===== {name} =====\n\n{contents}")
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("UOSLabManager license and notices")
+        dialog.resize(900, 700)
+        layout = QVBoxLayout(dialog)
+        viewer = QTextBrowser()
+        viewer.setPlainText("\n\n".join(sections))
+        layout.addWidget(viewer)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def _build_ui(self):
         self.measurement = MeasurementPanels(self.manager, self.plugins, self.log)
         self.sequence_panel = SequencePanel(self.manager, self.log)
-        default_output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "camera_recordings")
+        default_output_dir = str(storage_dir("camera_recordings"))
         output_dir = self.window_settings.value("camera/output_dir", default_output_dir)
         self.camera_panel = CameraWorkspace(output_dir, self.log)
+        self.plugin_studio = PluginStudioPanel(self)
+        self.plugin_studio.reload_requested.connect(self.reload_experiment_plugins)
 
         self.data_workspace = QSplitter(Qt.Orientation.Vertical)
         self.data_workspace.addWidget(self.measurement.graph_widget)
@@ -62,6 +125,12 @@ class MainWindow(QMainWindow):
             self.manager, self.plugins, self.experiment_plugins,
             self.open_device_tab, self.open_experiment,
         )
+        self.sequence_panel.set_experiment_plugins(
+            self.experiment_plugins,
+            self.execute_experiment_sequence_action,
+            self.poll_experiment_sequence_action,
+            self.cancel_experiment_sequence_action,
+        )
 
         self.tabs = QTabWidget()
         self.tabs.setDocumentMode(True)
@@ -69,14 +138,19 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.currentChanged.connect(self.update_active_experiment)
+        self.tabs.addTab(self.plugin_studio, "Plugin Studio")
         self.tabs.addTab(self.data_workspace, "Data")
         self.tabs.addTab(self.sequence_workspace, "Sequence")
         self.tabs.addTab(self.camera_panel, "Camera")
-        for index, color in enumerate(("#4da3ff", "#ffb74d", "#66bb6a")):
+        self.fixed_tabs = {
+            self.plugin_studio, self.data_workspace,
+            self.sequence_workspace, self.camera_panel,
+        }
+        for index, color in enumerate(("#ba68c8", "#4da3ff", "#ffb74d", "#66bb6a")):
             self.tabs.tabBar().setTabTextColor(index, QColor(color))
             self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.LeftSide, None)
             self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.plugin_studio)
         central = QWidget()
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -219,6 +293,82 @@ class MainWindow(QMainWindow):
         if self.sequence_panel.load_experiment(plugin):
             self.tabs.setCurrentWidget(self.sequence_workspace)
 
+    def reload_experiment_plugins(self):
+        if self.sequence_panel.is_running:
+            QMessageBox.warning(
+                self, "Plugin Studio",
+                "Stop the running sequence before reloading plugins.",
+            )
+            return
+        if self.experiment_tabs:
+            QMessageBox.warning(
+                self, "Plugin Studio",
+                "Close all open experiment tabs before reloading plugins.",
+            )
+            return
+        if self.manager.devices or self.device_tabs:
+            QMessageBox.warning(
+                self, "Plugin Studio",
+                "Disconnect all devices and close all device settings tabs before "
+                "reloading device plugins.",
+            )
+            return
+        try:
+            experiment_plugins = load_experiment_plugins()
+            device_plugins = load_device_plugins(reload_modules=True)
+        except Exception as error:
+            QMessageBox.critical(self, "Plugin reload failed", str(error))
+            self.plugin_studio.codex_panel.set_activity(f"Reload failed:\n{error}")
+            return
+        self.experiment_plugins = experiment_plugins
+        self.plugins = device_plugins
+        self.measurement.plugins = device_plugins
+        self.dashboard.set_experiment_plugins(experiment_plugins)
+        self.dashboard.set_device_plugins(device_plugins)
+        self.sequence_panel.set_experiment_plugins(experiment_plugins)
+        self.plugin_studio.codex_panel.set_activity(
+            f"Reloaded {len(experiment_plugins)} experiment plugins and "
+            f"{len(device_plugins)} device plugins. Restart the application if a "
+            "device plugin changed its measurement columns."
+        )
+        self.log(
+            f"Reloaded {len(experiment_plugins)} experiment plugins and "
+            f"{len(device_plugins)} device plugins"
+        )
+
+    def _experiment_panel_for_sequence(self, step, create=False):
+        experiment_id = step["dev"].partition(":")[2]
+        panel = self.experiment_tabs.get(experiment_id)
+        if panel is None and create:
+            plugin = self.experiment_plugins.get(experiment_id)
+            if plugin is None or plugin.panel_factory is None:
+                raise RuntimeError(f"Experiment panel is unavailable: {experiment_id}")
+            self.open_experiment(experiment_id)
+            panel = self.experiment_tabs.get(experiment_id)
+        if panel is None:
+            raise RuntimeError(f"Experiment panel is unavailable: {experiment_id}")
+        return panel
+
+    def execute_experiment_sequence_action(self, step):
+        panel = self._experiment_panel_for_sequence(step, create=True)
+        handler = getattr(panel, "execute_sequence_command", None)
+        if handler is None:
+            raise RuntimeError("This experiment does not implement sequence commands")
+        return bool(handler(step["cmd"], step["val"]))
+
+    def poll_experiment_sequence_action(self, step):
+        panel = self._experiment_panel_for_sequence(step)
+        handler = getattr(panel, "is_sequence_command_complete", None)
+        if handler is None:
+            raise RuntimeError("This experiment cannot report sequence progress")
+        return bool(handler(step["cmd"], step["val"]))
+
+    def cancel_experiment_sequence_action(self, step):
+        panel = self._experiment_panel_for_sequence(step)
+        handler = getattr(panel, "cancel_sequence_command", None)
+        if handler is not None:
+            handler()
+
     def update_active_experiment(self, _index=None):
         if not hasattr(self, "dashboard") or not hasattr(self, "tabs"):
             return
@@ -234,9 +384,9 @@ class MainWindow(QMainWindow):
         self.dashboard.set_active_experiment(active_id)
 
     def close_tab(self, index):
-        if index < 3:
-            return
         container = self.tabs.widget(index)
+        if container in self.fixed_tabs:
+            return
         self.tabs.removeTab(index)
         if container is self.settings_panel:
             self.settings_panel.deleteLater()
@@ -318,6 +468,10 @@ class MainWindow(QMainWindow):
         self.log("EMERGENCY STOP ACTIVATED")
 
     def closeEvent(self, event):
+        if not self.plugin_studio.maybe_discard_changes():
+            event.ignore()
+            return
+        self.plugin_studio.shutdown()
         self.clock_timer.stop()
         self.measurement.timer.stop()
         self.sequence_panel.engine_timer.stop()

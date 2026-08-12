@@ -6,7 +6,7 @@ from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
-    QTabWidget, QTextEdit, QVBoxLayout, QWidget,
+    QTextEdit, QVBoxLayout, QWidget,
 )
 
 from gui.panel_ctvideo import CTVideoView
@@ -83,15 +83,15 @@ class HeatingPIDWorker(QThread):
         voltage_limit = config["voltage_limit"]
         current_limit = config["current_limit"]
         power_limit = config["power_limit"]
-        current_cap = min(
-            current_limit,
-            0.0 if voltage_limit <= 0 else power_limit / voltage_limit,
+        power_cap = min(
+            power_limit,
+            max(0.0, voltage_limit) * max(0.0, current_limit),
         )
         integral = 0.0
         previous_temperature = None
         commanded_current = 0.0
-        ramped_power = 0.0
-        previous_at = time.monotonic()
+        commanded_power = 0.0
+        resistance_estimate = None
         safety_reason = ""
         try:
             ct_values = self.manager.get_latest("CTVIDEO3M")
@@ -111,6 +111,7 @@ class HeatingPIDWorker(QThread):
             device.set_current(0.0)
             device.set_voltage(voltage_limit)
             device.output_on()
+            previous_at = time.monotonic()
             self.status_changed.emit("Running")
             while not self.isInterruptionRequested():
                 ct_values = self.manager.get_latest("CTVIDEO3M")
@@ -132,50 +133,90 @@ class HeatingPIDWorker(QThread):
                     now = time.monotonic()
                     elapsed = max(0.001, now - previous_at)
                     previous_at = now
+                    temperature = float(temperature)
+
+                    measured_voltage = float(zup_values.get("voltage_V", 0.0))
+                    measured_current = float(zup_values.get("current_A", 0.0))
+                    if measured_voltage > 0.05 and measured_current > 0.005:
+                        observed_resistance = measured_voltage / measured_current
+                        if math.isfinite(observed_resistance) and observed_resistance > 0:
+                            resistance_estimate = (
+                                observed_resistance
+                                if resistance_estimate is None
+                                else 0.8 * resistance_estimate
+                                + 0.2 * observed_resistance
+                            )
+
                     error = config["target_temperature"] - temperature
                     derivative = 0.0
                     if previous_temperature is not None:
-                        derivative = -(temperature - previous_temperature) / elapsed
+                        derivative = -(
+                            temperature - previous_temperature
+                        ) / elapsed
                     previous_temperature = temperature
 
                     candidate_integral = integral + error * elapsed
-                    base_output = config["p"] * error + config["d"] * derivative
-                    unsaturated = base_output + config["i"] * candidate_integral
-                    if (
-                        0.0 < unsaturated < current_cap
-                        or (unsaturated >= current_cap and error < 0)
+                    base_output = (
+                        config["p"] * error
+                        + config["d"] * derivative
+                    )
+                    unsaturated = (
+                        base_output + config["i"] * candidate_integral
+                    )
+                    physical_allows_integral = (
+                        0.0 < unsaturated < power_cap
+                        or (unsaturated >= power_cap and error < 0)
                         or (unsaturated <= 0.0 and error > 0)
-                    ):
+                    )
+                    if physical_allows_integral:
                         integral = candidate_integral
-                    desired_current = base_output + config["i"] * integral
-                    desired_current = max(0.0, min(current_cap, desired_current))
+                    desired_power = max(
+                        0.0,
+                        min(
+                            power_cap,
+                            base_output + config["i"] * integral,
+                        ),
+                    )
 
-                    if (
-                        config["current_ramp_enabled"]
-                        and desired_current > commanded_current
-                    ):
-                        desired_current = min(
-                            desired_current,
-                            commanded_current + config["current_ramp_rate"] * elapsed,
-                        )
-                    desired_power = desired_current * voltage_limit
-                    if (
-                        config["power_ramp_enabled"]
-                        and desired_power > ramped_power
-                    ):
-                        ramped_power = min(
-                            desired_power,
-                            ramped_power + config["power_ramp_rate"] * elapsed,
-                        )
-                        desired_current = min(
-                            desired_current,
-                            0.0 if voltage_limit <= 0 else ramped_power / voltage_limit,
+                    if resistance_estimate is not None:
+                        desired_current = math.sqrt(
+                            max(0.0, desired_power) / resistance_estimate
                         )
                     else:
-                        ramped_power = desired_power
+                        conversion_voltage = (
+                            measured_voltage
+                            if measured_voltage > 0.1
+                            else voltage_limit
+                        )
+                        desired_current = (
+                            0.0
+                            if conversion_voltage <= 0.0
+                            else desired_power / conversion_voltage
+                        )
+                    desired_current = min(current_limit, desired_current)
+                    if config["current_ramp_enabled"]:
+                        max_current_change = (
+                            config["current_ramp_rate"] * elapsed
+                        )
+                        desired_current = max(
+                            commanded_current - max_current_change,
+                            min(
+                                commanded_current + max_current_change,
+                                desired_current,
+                            ),
+                        )
                     commanded_current = desired_current
+                    if resistance_estimate is not None:
+                        commanded_power = min(
+                            power_cap,
+                            commanded_current ** 2 * resistance_estimate,
+                        )
+                    else:
+                        commanded_power = min(
+                            power_cap, commanded_current * conversion_voltage
+                        )
                     device.set_current(commanded_current)
-                    self.output_changed.emit(commanded_current, ramped_power)
+                    self.output_changed.emit(commanded_current, commanded_power)
                 for _ in range(10):
                     if self.isInterruptionRequested():
                         break
@@ -214,6 +255,7 @@ class HeatingControlPanel(QWidget):
         self.control_active = False
         self.control_worker = None
         self.control_safety_reason = ""
+        self.connection_states = {}
         self._build_ui()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(250)
@@ -227,7 +269,7 @@ class HeatingControlPanel(QWidget):
         layout.setSpacing(6)
         layout.addWidget(self._build_connections_and_log(), 0, 0)
         layout.addWidget(self._build_pyrometer_view(), 0, 1)
-        layout.addWidget(self._build_settings_tabs(), 1, 0)
+        layout.addWidget(self._build_control_settings(), 1, 0)
         layout.addWidget(self._build_graph(), 1, 1)
         layout.setRowStretch(0, 1)
         layout.setRowStretch(1, 1)
@@ -253,19 +295,29 @@ class HeatingControlPanel(QWidget):
         self.zup_status = QLabel("Disconnected")
         self.zup_button = QPushButton("Connect")
         self.zup_button.clicked.connect(self.toggle_zup)
+        self.zup_settings_button = QPushButton("Settings")
+        self.zup_settings_button.clicked.connect(
+            lambda: self.open_device_settings("ZUP")
+        )
         connection_grid.addWidget(QLabel("ZUP 36-12"), 1, 0)
         connection_grid.addWidget(self.zup_port, 1, 1)
         connection_grid.addWidget(self.zup_status, 1, 2)
         connection_grid.addWidget(self.zup_button, 1, 3)
+        connection_grid.addWidget(self.zup_settings_button, 1, 4)
 
         self.ctvideo_port = QLineEdit(default_connection())
         self.ctvideo_status = QLabel("Disconnected")
         self.ctvideo_button = QPushButton("Connect")
         self.ctvideo_button.clicked.connect(self.toggle_ctvideo)
+        self.ctvideo_settings_button = QPushButton("Settings")
+        self.ctvideo_settings_button.clicked.connect(
+            lambda: self.open_device_settings("CTVIDEO3M")
+        )
         connection_grid.addWidget(QLabel("CTvideo 3M"), 2, 0)
         connection_grid.addWidget(self.ctvideo_port, 2, 1)
         connection_grid.addWidget(self.ctvideo_status, 2, 2)
         connection_grid.addWidget(self.ctvideo_button, 2, 3)
+        connection_grid.addWidget(self.ctvideo_settings_button, 2, 4)
         connection_grid.setColumnStretch(1, 1)
         left_layout.addLayout(connection_grid)
 
@@ -317,14 +369,10 @@ class HeatingControlPanel(QWidget):
         layout.addWidget(self.video_view, 1)
         return panel
 
-    def _build_settings_tabs(self):
-        group = QGroupBox("Device Settings")
+    def _build_control_settings(self):
+        group = QGroupBox("Heating Control")
         layout = QVBoxLayout(group)
-        self.settings_tabs = QTabWidget()
-        self.settings_tabs.addTab(self._build_heating_settings(), "Heating Control")
-        self.settings_tabs.addTab(self._build_zup_settings(), "ZUP 36-12")
-        self.settings_tabs.addTab(self._build_ctvideo_settings(), "CTvideo 3M")
-        layout.addWidget(self.settings_tabs)
+        layout.addWidget(self._build_heating_settings())
         return group
 
     def _build_heating_settings(self):
@@ -338,27 +386,22 @@ class HeatingControlPanel(QWidget):
         target_form.addRow("Target temperature", self.target_temperature)
         target_form.addRow("Safety temperature", self.max_temperature)
 
-        ramp_group = QGroupBox("Current / Power Ramp Up")
+        ramp_group = QGroupBox("Current Ramp")
         ramp_form = QFormLayout(ramp_group)
         self.current_ramp_enabled = QCheckBox("Enabled")
         self.current_ramp_enabled.setChecked(True)
         self.current_ramp_rate = self._spin(0.001, 12.0, 0.1, 3, " A/s")
-        self.power_ramp_enabled = QCheckBox("Enabled")
-        self.power_ramp_enabled.setChecked(True)
-        self.power_ramp_rate = self._spin(0.01, 432.0, 1.0, 2, " W/s")
         ramp_form.addRow("Current ramp", self.current_ramp_enabled)
-        ramp_form.addRow("Current rate", self.current_ramp_rate)
-        ramp_form.addRow("Power ramp", self.power_ramp_enabled)
-        ramp_form.addRow("Power rate", self.power_ramp_rate)
+        ramp_form.addRow("Rise / fall rate", self.current_ramp_rate)
 
         pid_group = QGroupBox("PID")
         pid_form = QFormLayout(pid_group)
-        self.pid_p = self._spin(0.0, 1000.0, 0.02, 4)
-        self.pid_i = self._spin(0.0, 1000.0, 0.001, 4)
+        self.pid_p = self._spin(0.0, 1000.0, 0.24, 4)
+        self.pid_i = self._spin(0.0, 1000.0, 0.012, 4)
         self.pid_d = self._spin(0.0, 1000.0, 0.0, 4)
-        pid_form.addRow("P [A/°C]", self.pid_p)
-        pid_form.addRow("I [A/(°C·s)]", self.pid_i)
-        pid_form.addRow("D [A·s/°C]", self.pid_d)
+        pid_form.addRow("P [W/°C]", self.pid_p)
+        pid_form.addRow("I [W/(°C·s)]", self.pid_i)
+        pid_form.addRow("D [W·s/°C]", self.pid_d)
 
         limit_group = QGroupBox("Output Limits")
         limit_form = QFormLayout(limit_group)
@@ -379,7 +422,7 @@ class HeatingControlPanel(QWidget):
         controls = QVBoxLayout()
         self.control_status = QLabel("Stopped")
         self.control_status.setStyleSheet("font-weight:bold; color:#e74c3c;")
-        self.control_output_label = QLabel("Current: - / Power command: -")
+        self.control_output_label = QLabel("Power command: - / Current command: -")
         self.start_control_button = QPushButton("Start Heating Control")
         self.start_control_button.setStyleSheet(
             "background:#1f8f4e; color:white; font-weight:bold;"
@@ -394,7 +437,6 @@ class HeatingControlPanel(QWidget):
         self.control_setting_widgets = (
             self.target_temperature, self.max_temperature,
             self.current_ramp_enabled, self.current_ramp_rate,
-            self.power_ramp_enabled, self.power_ramp_rate,
             self.pid_p, self.pid_i, self.pid_d,
             self.control_voltage_limit, self.control_current_limit,
             self.control_power_limit,
@@ -405,52 +447,6 @@ class HeatingControlPanel(QWidget):
         controls.addWidget(self.start_control_button)
         controls.addWidget(self.stop_control_button)
         layout.addLayout(controls, 2, 0, 1, 2)
-        return panel
-
-    def _build_zup_settings(self):
-        panel = QWidget()
-        form = QFormLayout(panel)
-        self.zup_voltage = self._spin(0.0, 36.0, 0.0, 2, " V")
-        self.zup_current = self._spin(0.0, 12.0, 1.0, 3, " A")
-        self.zup_ovp = self._spin(0.0, 39.6, 38.0, 1, " V")
-        self.zup_uvp = self._spin(0.0, 35.9, 0.0, 1, " V")
-        self.zup_output = QCheckBox("Output ON")
-        apply_button = QPushButton("Apply ZUP Settings")
-        apply_button.clicked.connect(self.apply_zup_settings)
-        read_button = QPushButton("Read Device")
-        read_button.clicked.connect(self.read_zup_settings)
-        buttons = QHBoxLayout()
-        buttons.addWidget(read_button)
-        buttons.addWidget(apply_button)
-        form.addRow("Set voltage", self.zup_voltage)
-        form.addRow("Current limit", self.zup_current)
-        form.addRow("OVP", self.zup_ovp)
-        form.addRow("UVP", self.zup_uvp)
-        form.addRow("Output", self.zup_output)
-        form.addRow(buttons)
-        return panel
-
-    def _build_ctvideo_settings(self):
-        panel = QWidget()
-        form = QFormLayout(panel)
-        self.emissivity = self._spin(0.001, 1.0, 1.0, 3)
-        self.transmission = self._spin(0.001, 1.0, 1.0, 3)
-        self.average_time = self._spin(0.0, 6553.5, 0.0, 1, " s")
-        self.smart_averaging = QCheckBox("Enabled")
-        self.peak_hold = self._spin(0.0, 6553.5, 0.0, 1, " s")
-        apply_button = QPushButton("Apply CTvideo Settings")
-        apply_button.clicked.connect(self.apply_ctvideo_settings)
-        read_button = QPushButton("Read Device")
-        read_button.clicked.connect(self.read_ctvideo_settings)
-        buttons = QHBoxLayout()
-        buttons.addWidget(read_button)
-        buttons.addWidget(apply_button)
-        form.addRow("Emissivity", self.emissivity)
-        form.addRow("Transmission", self.transmission)
-        form.addRow("Averaging time", self.average_time)
-        form.addRow("Smart averaging", self.smart_averaging)
-        form.addRow("Peak hold", self.peak_hold)
-        form.addRow(buttons)
         return panel
 
     def _build_graph(self):
@@ -529,30 +525,50 @@ class HeatingControlPanel(QWidget):
         self._notify_main()
 
     def toggle_ctvideo(self):
-        if self.manager.get_device("CTVIDEO3M") is None:
+        if (
+            self.manager.get_device("CTVIDEO3M") is None
+            or self.video_view.worker is None
+        ):
             self.connect_ctvideo()
         else:
             self.disconnect_ctvideo()
 
     def connect_ctvideo(self):
         port = self.ctvideo_port.text().strip()
+        created_device = False
         try:
-            self.manager.add_device(
-                "CTVIDEO3M",
-                lambda: create_ctvideo(port, verify=True),
-                interval=0.1,
-            )
-            self.owned_devices.add("CTVIDEO3M")
-            camera = resolve_camera_for_port(port)
-            self.video_view.start_preview(
-                camera["CameraIndex"], camera["CameraName"],
-                camera_info=camera,
-            )
+            if self.manager.get_device("CTVIDEO3M") is None:
+                self.manager.add_device(
+                    "CTVIDEO3M",
+                    lambda: create_ctvideo(port, verify=True),
+                    interval=0.1,
+                )
+                self.owned_devices.add("CTVIDEO3M")
+                created_device = True
+            else:
+                self.log("Using the existing CTvideo 3M serial connection")
+                port = self.manager.get_device("CTVIDEO3M").get_port()
+                self.ctvideo_port.setText(port)
+            try:
+                camera = resolve_camera_for_port(port)
+            except Exception as camera_error:
+                camera = {
+                    "CameraIndex": 1,
+                    "CameraName": "CTvideo OpenCV fallback",
+                }
+                self.log(
+                    f"Camera mapping failed ({camera_error}); "
+                    "starting automatic OpenCV source recovery."
+                )
+            if not self.video_view.start_preview(
+                camera["CameraIndex"], camera["CameraName"], camera_info=camera
+            ):
+                raise RuntimeError("The CTvideo camera thread did not start.")
             self.log(f"CTvideo 3M connected: {port}")
             self._notify_main()
         except Exception as error:
             self.video_view.stop_preview()
-            if "CTVIDEO3M" in self.owned_devices:
+            if created_device:
                 self.manager.remove_device("CTVIDEO3M")
                 self.owned_devices.discard("CTVIDEO3M")
             self.show_error("CTvideo 3M", error)
@@ -561,72 +577,52 @@ class HeatingControlPanel(QWidget):
         if self.control_active:
             self.stop_control(wait=True)
         self.video_view.stop_preview()
-        self.manager.remove_device("CTVIDEO3M")
-        self.owned_devices.discard("CTVIDEO3M")
-        self.log("CTvideo 3M disconnected")
+        if "CTVIDEO3M" in self.owned_devices:
+            self.manager.remove_device("CTVIDEO3M")
+            self.owned_devices.discard("CTVIDEO3M")
+            self.log("CTvideo 3M disconnected")
+        else:
+            self.log("Detached from the shared CTvideo 3M preview")
         self._notify_main()
 
-    def read_zup_settings(self):
-        device = self.manager.get_device("ZUP")
-        if device is None:
-            self.show_error("ZUP 36-12", "Connect the device first.")
-            return
-        try:
-            values = device.read_settings()
-            self.zup_voltage.setValue(values["voltage"])
-            self.zup_current.setValue(values["current"])
-            self.zup_ovp.setValue(values["ovp"])
-            self.zup_uvp.setValue(values["uvp"])
-            self.zup_output.setChecked(values["output"])
-            self.log("ZUP settings read")
-        except Exception as error:
-            self.show_error("ZUP 36-12", error)
+    def execute_sequence_command(self, command, value):
+        if command == "ramp_to_setpoint":
+            target = float(value)
+            if target > self.max_temperature.value():
+                raise ValueError(
+                    f"Sequence target {target:.1f} °C exceeds the safety limit "
+                    f"{self.max_temperature.value():.1f} °C"
+                )
+            self.control_safety_reason = ""
+            self.target_temperature.setValue(target)
+            if self.control_active and self.control_worker is not None:
+                self.control_worker.config["target_temperature"] = target
+                self.log(f"Sequence changed target to {target:.1f} °C")
+            else:
+                self.start_control()
+                if not self.control_active:
+                    raise RuntimeError("Heating control could not be started")
+            return False
+        if command == "stop_heating":
+            self.stop_control()
+            return not self.control_active
+        raise ValueError(f"Unsupported Heating Control sequence command: {command}")
 
-    def apply_zup_settings(self):
-        device = self.manager.get_device("ZUP")
-        if device is None:
-            self.show_error("ZUP 36-12", "Connect the device first.")
-            return
-        try:
-            device.set_ovp(self.zup_ovp.value())
-            device.set_uvp(self.zup_uvp.value())
-            device.set_voltage(self.zup_voltage.value())
-            device.set_current(self.zup_current.value())
-            device.output_on() if self.zup_output.isChecked() else device.output_off()
-            self.log("ZUP settings applied")
-        except Exception as error:
-            self.show_error("ZUP 36-12", error)
+    def is_sequence_command_complete(self, command, value):
+        if command == "stop_heating":
+            return not self.control_active
+        if command != "ramp_to_setpoint":
+            raise ValueError(f"Unsupported Heating Control sequence command: {command}")
+        if self.control_safety_reason:
+            raise RuntimeError(f"Heating safety stop: {self.control_safety_reason}")
+        if not self.control_active:
+            raise RuntimeError("Heating control stopped before reaching the setpoint")
+        temperature = self.manager.get_latest("CTVIDEO3M").get("actual_temp_C")
+        return temperature is not None and abs(float(temperature) - float(value)) <= 2.5
 
-    def read_ctvideo_settings(self):
-        device = self.manager.get_device("CTVIDEO3M")
-        if device is None:
-            self.show_error("CTvideo 3M", "Connect the device first.")
-            return
-        try:
-            values = device.read_settings()
-            self.emissivity.setValue(values["emissivity"])
-            self.transmission.setValue(values["transmission"])
-            self.average_time.setValue(values["average_time_s"])
-            self.smart_averaging.setChecked(values["smart_averaging"])
-            self.peak_hold.setValue(values["peak_hold_s"])
-            self.log("CTvideo settings read")
-        except Exception as error:
-            self.show_error("CTvideo 3M", error)
-
-    def apply_ctvideo_settings(self):
-        device = self.manager.get_device("CTVIDEO3M")
-        if device is None:
-            self.show_error("CTvideo 3M", "Connect the device first.")
-            return
-        try:
-            device.set_emissivity(self.emissivity.value())
-            device.set_transmission(self.transmission.value())
-            device.set_average_time(self.average_time.value())
-            device.set_smart_averaging(self.smart_averaging.isChecked())
-            device.set_peak_hold_time(self.peak_hold.value())
-            self.log("CTvideo settings applied")
-        except Exception as error:
-            self.show_error("CTvideo 3M", error)
+    def cancel_sequence_command(self):
+        if self.control_active:
+            self.stop_control()
 
     def start_control(self):
         zup = self.manager.get_device("ZUP")
@@ -662,15 +658,11 @@ class HeatingControlPanel(QWidget):
             "power_limit": self.control_power_limit.value(),
             "current_ramp_enabled": self.current_ramp_enabled.isChecked(),
             "current_ramp_rate": self.current_ramp_rate.value(),
-            "power_ramp_enabled": self.power_ramp_enabled.isChecked(),
-            "power_ramp_rate": self.power_ramp_rate.value(),
         }
         self.control_safety_reason = ""
         self.control_active = True
         for widget in self.control_setting_widgets:
             widget.setEnabled(False)
-        self.settings_tabs.setTabEnabled(1, False)
-        self.settings_tabs.setTabEnabled(2, False)
         self.start_control_button.setEnabled(False)
         self.stop_control_button.setEnabled(True)
         self.control_worker = HeatingPIDWorker(self.manager, config, self)
@@ -679,7 +671,7 @@ class HeatingControlPanel(QWidget):
         self.control_worker.safety_tripped.connect(self.handle_safety_trip)
         self.control_worker.finished.connect(self.control_finished)
         self.control_worker.start()
-        self.log("Heating control started")
+        self.log("Heating control started with bidirectional current ramp")
 
     def stop_control(self, _checked=False, wait=False):
         worker = self.control_worker
@@ -694,8 +686,8 @@ class HeatingControlPanel(QWidget):
             self.log("Heating control thread did not stop within 4 seconds")
 
     def update_control_status(self, status):
-        if status == "Running":
-            self.control_status.setText("Running / Current PID")
+        if status in ("PID", "Running"):
+            self.control_status.setText("Running / Power PID")
             self.control_status.setStyleSheet("font-weight:bold; color:#2ecc71;")
         elif self.control_safety_reason:
             self.control_status.setText("SAFETY STOP")
@@ -706,7 +698,7 @@ class HeatingControlPanel(QWidget):
 
     def update_control_output(self, current, power):
         self.control_output_label.setText(
-            f"Current command: {current:.3f} A / Power command: {power:.2f} W"
+            f"Power command: {power:.2f} W / Current command: {current:.3f} A"
         )
 
     def handle_safety_trip(self, reason):
@@ -722,8 +714,6 @@ class HeatingControlPanel(QWidget):
         self.control_active = False
         for widget in self.control_setting_widgets:
             widget.setEnabled(True)
-        self.settings_tabs.setTabEnabled(1, True)
-        self.settings_tabs.setTabEnabled(2, True)
         self.start_control_button.setEnabled(True)
         self.stop_control_button.setEnabled(False)
         self.update_control_status("Stopped")
@@ -795,17 +785,39 @@ class HeatingControlPanel(QWidget):
         )
 
     def _sync_device_widgets(self, device_id, status, button, port):
-        connected = self.manager.get_device(device_id) is not None
+        device = self.manager.get_device(device_id)
+        connected = device is not None
+        if connected and not self.connection_states.get(device_id, False):
+            try:
+                port.setText(device.get_port())
+            except Exception as error:
+                self.log(f"{device_id} port synchronization failed: {error}")
+        self.connection_states[device_id] = connected
         status.setText("Connected" if connected else "Disconnected")
         status.setStyleSheet(
             f"color:{'#2ecc71' if connected else '#e74c3c'}; font-weight:bold;"
         )
-        button.setText("Disconnect" if connected else "Connect")
+        preview_detached = (
+            device_id == "CTVIDEO3M"
+            and connected
+            and self.video_view.worker is None
+        )
+        button.setText(
+            "Show Video" if preview_detached
+            else ("Disconnect" if connected else "Connect")
+        )
         button.setStyleSheet(
             "color:white; font-weight:bold; background:"
             + ("#c0392b;" if connected else "#1f8f4e;")
         )
         port.setEnabled(not connected)
+
+    def open_device_settings(self, device_id):
+        if self.main_window is None or not hasattr(
+            self.main_window, "open_device_tab"
+        ):
+            return
+        self.main_window.open_device_tab(device_id)
 
     def emergency_stop(self):
         was_active = self.control_active
@@ -815,7 +827,6 @@ class HeatingControlPanel(QWidget):
             errors = self._reset_zup_output(device)
             if errors:
                 self.log(f"Emergency safe-reset warning: {'; '.join(errors)}")
-        self.zup_output.setChecked(False)
         if not was_active:
             self.log("Emergency stop: output OFF, voltage/current reset to 0")
 

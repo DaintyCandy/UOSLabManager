@@ -1,13 +1,11 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from plugins.devices.ctvideo_3m import panel as panel_module
 from plugins.devices.ctvideo_3m.panel import CTVideo3MPanel
 
 
@@ -21,7 +19,7 @@ class FakeManager:
         return {"response_ms": None}
 
 
-class TestMacOSUVCPanel(unittest.TestCase):
+class TestMacOSCameraPanel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -34,62 +32,41 @@ class TestMacOSUVCPanel(unittest.TestCase):
     def tearDown(self):
         self.panel.close()
 
-    def test_uses_native_range_and_disables_unadvertised_gain(self):
+    def test_generic_uvc_widgets_are_not_restored(self):
+        for attribute in (
+            "camera_brightness",
+            "camera_contrast",
+            "camera_gain",
+            "camera_exposure",
+            "camera_roi",
+        ):
+            with self.subTest(attribute=attribute):
+                self.assertFalse(hasattr(self.panel, attribute))
+
+    def test_vendor_controls_stay_disabled_when_vendor_xu_is_unavailable(self):
         properties = {
-            "brightness_supported": True,
-            "gain_supported": False,
-            "auto_exposure": None,
-            "auto_exposure_raw": None,
-            "uvc_controls": {
-                "Brightness": {
-                    "supported": True,
-                    "settable": True,
-                    "minimum": 0,
-                    "maximum": 255,
-                    "step": 1,
-                    "default": 118,
-                    "current": 118,
-                },
-                "Gain": {
+            "operation": "read",
+            "controls": {
+                "CompactConnect Video Gain": {
                     "supported": False,
-                    "settable": False,
-                    "minimum": None,
-                    "maximum": None,
-                    "step": None,
-                    "default": None,
                     "current": None,
+                    "detail": "Vendor XU is unavailable on macOS",
+                },
+                "CompactConnect Anti-flicker": {
+                    "supported": False,
+                    "current": None,
+                    "display": "Anti-flicker unavailable",
+                    "detail": "Vendor XU is unavailable on macOS",
                 },
             },
         }
 
-        with patch.object(panel_module.sys, "platform", "darwin"):
-            self.panel.update_camera_properties(properties)
+        self.panel.update_camera_properties(properties)
 
-        self.assertTrue(self.panel.camera_brightness.isEnabled())
-        self.assertEqual(self.panel.camera_brightness.minimum(), 0)
-        self.assertEqual(self.panel.camera_brightness.maximum(), 255)
-        self.assertEqual(self.panel.camera_brightness.value(), 118)
-        self.assertFalse(self.panel.camera_gain.isEnabled())
-        self.assertEqual(
-            self.panel.auto_exposure_label.text(), "Auto exposure: unsupported"
-        )
-
-    def test_disables_controls_when_native_probe_is_unavailable(self):
-        properties = {
-            "brightness_supported": False,
-            "gain_supported": False,
-            "auto_exposure": None,
-            "auto_exposure_raw": None,
-            "uvc_controls": {},
-        }
-
-        with patch.object(panel_module.sys, "platform", "darwin"):
-            self.panel.update_camera_properties(properties)
-
-        self.assertFalse(self.panel.camera_brightness.isEnabled())
-        self.assertFalse(self.panel.camera_gain.isEnabled())
-        self.assertFalse(self.panel.camera_power_line.isEnabled())
-        self.assertFalse(self.panel.camera_roi.isEnabled())
+        self.assertFalse(self.panel.compactconnect_video_gain.isEnabled())
+        self.assertFalse(self.panel.compactconnect_anti_flicker.isEnabled())
+        self.assertIn("Unavailable", self.panel.video_gain_readback.text())
+        self.assertIn("Unavailable", self.panel.anti_flicker_readback.text())
 
 
 if __name__ == "__main__":

@@ -56,19 +56,19 @@ clicking Connect:
 The macOS connection factory performs one read-only temperature verification
 before it marks the device connected or starts its camera.
 
-## Camera controls
+## Camera preview and controls
 
-OpenCV's AVFoundation backend does not transport standard UVC brightness or
-gain properties. On macOS the application therefore builds a small native
-IOKit helper on first use with the installed Apple Command Line Tools. The
-helper opens only the camera's VideoControl interface and performs UVC
-GET/SET/read-back operations; it does not seize or reset the USB device.
+OpenCV uses the AVFoundation backend for the camera preview. The repository
+also contains a native IOKit diagnostic helper for standard UVC
+GET/SET/read-back operations; it opens only the camera's VideoControl
+interface and does not seize or reset the USB device.
 
-The observed `CMS_309I01 AA00000000` camera advertises Brightness with range
-`0..255`, but does not advertise a writable standard UVC Gain control. The UI
-uses the ranges and current values read from the camera. Unsupported controls,
-including Gain on this unit, are disabled instead of displaying OpenCV's
-placeholder zero as a successful read-back.
+The application UI intentionally does not expose generic UVC brightness,
+gain, exposure, or ROI controls. Video Gain and Anti-flicker are
+CompactConnect vendor Extension Unit settings, not standard UVC controls, and
+the current implementation accesses that vendor XU only through Windows
+DirectShow. They therefore remain unavailable on macOS instead of being
+silently mapped to unrelated standard UVC properties.
 
 The sensor and camera are normally paired by their shared USB container. If
 the D2XX-open sensor is temporarily absent from the I/O Registry, the macOS
