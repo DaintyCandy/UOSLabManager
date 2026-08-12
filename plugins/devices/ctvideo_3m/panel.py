@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.panel_ctvideo import CTVideoView
+from .connection import create_ctvideo, default_connection
 from .driver import CTVideo3M
 from .usb_camera import resolve_camera_for_port
 from .video_display import CompactConnectVideoDisplaySettings
@@ -71,7 +72,7 @@ class CTVideo3MPanel(QWidget):
     def _build_monitor(self):
         group = QGroupBox("CTvideo 3M")
         layout = QGridLayout(group)
-        self.port_input = QLineEdit("COM6")
+        self.port_input = QLineEdit(default_connection())
         self.status_label = QLabel("Disconnected")
         self.response_label = QLabel("Response: -")
         self.connection_button = QPushButton("Connect")
@@ -594,7 +595,11 @@ class CTVideo3MPanel(QWidget):
         try:
             port = self.port_input.text().strip()
             interval = 1.0 / self.refresh_rate.value()
-            self.manager.add_device("CTVIDEO3M", lambda: CTVideo3M(port), interval=interval)
+            self.manager.add_device(
+                "CTVIDEO3M",
+                lambda: create_ctvideo(port, verify=True),
+                interval=interval,
+            )
             device_info = self._resolve_camera_info(port)
             self._show_connection_addresses(device_info)
             self._video_attach_attempted = True
@@ -1239,7 +1244,7 @@ class CTVideo3MPanel(QWidget):
         }
 
     def load_profile_data(self, data):
-        self.port_input.setText(data.get("port", "COM6"))
+        self.port_input.setText(data.get("port", default_connection()))
         self.refresh_rate.setValue(data.get("refresh_rate_Hz", 10.0))
         self.emissivity.setValue(data.get("emissivity", 1.0))
         self.transmission.setValue(data.get("transmission", 1.0))

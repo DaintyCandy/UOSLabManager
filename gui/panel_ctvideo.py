@@ -1,3 +1,4 @@
+import sys
 import threading
 import time
 
@@ -21,6 +22,17 @@ except ImportError:
 
 VIDEO_GAIN_NAME = "CompactConnect Video Gain"
 ANTI_FLICKER_NAME = "CompactConnect Anti-flicker"
+
+
+def _capture_backend(source):
+    """Return the preferred OpenCV backend for the current platform."""
+    if not isinstance(source, int):
+        return cv2.CAP_ANY
+    if sys.platform == "win32":
+        return getattr(cv2, "CAP_DSHOW", cv2.CAP_ANY)
+    if sys.platform == "darwin":
+        return getattr(cv2, "CAP_AVFOUNDATION", cv2.CAP_ANY)
+    return cv2.CAP_ANY
 
 
 class CTVideoWorker(QThread):
@@ -54,14 +66,27 @@ class CTVideoWorker(QThread):
         if not isinstance(source, int):
             return ((cv2.CAP_ANY, "ANY"),)
         if source >= 0:
-            backend = getattr(cv2, "CAP_DSHOW", None)
-            return ((backend, "DirectShow"),) if backend is not None else ()
+            backend = _capture_backend(source)
+            label = {
+                "win32": "DirectShow",
+                "darwin": "AVFoundation",
+            }.get(sys.platform, "Auto")
+            return ((backend, label),)
         candidates = []
-        for attribute, label in (
-            ("CAP_DSHOW", "DirectShow"),
-            ("CAP_MSMF", "Media Foundation"),
-            ("CAP_ANY", "Auto"),
-        ):
+        if sys.platform == "win32":
+            backend_options = (
+                ("CAP_DSHOW", "DirectShow"),
+                ("CAP_MSMF", "Media Foundation"),
+                ("CAP_ANY", "Auto"),
+            )
+        elif sys.platform == "darwin":
+            backend_options = (
+                ("CAP_AVFOUNDATION", "AVFoundation"),
+                ("CAP_ANY", "Auto"),
+            )
+        else:
+            backend_options = (("CAP_ANY", "Auto"),)
+        for attribute, label in backend_options:
             backend = getattr(cv2, attribute, None)
             if backend is not None and all(item[0] != backend for item in candidates):
                 candidates.append((backend, label))
