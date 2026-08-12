@@ -119,7 +119,6 @@ class MainWindow(QMainWindow):
         sequence_layout.setContentsMargins(4, 4, 4, 4)
         sequence_layout.addWidget(self.sequence_panel, 2)
         sequence_layout.addWidget(self.measurement.log_widget, 1)
-        self.measurement.get_rheed_profile = self.camera_panel.get_latest_profile
 
         self.dashboard = DashboardPanel(
             self.manager, self.plugins, self.experiment_plugins,
@@ -130,6 +129,11 @@ class MainWindow(QMainWindow):
             self.execute_experiment_sequence_action,
             self.poll_experiment_sequence_action,
             self.cancel_experiment_sequence_action,
+        )
+        self.sequence_panel.set_common_actions(
+            self.set_sequence_recording,
+            self.measurement.add_sequence_marker,
+            self.sequence_safe_output,
         )
 
         self.tabs = QTabWidget()
@@ -142,6 +146,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.data_workspace, "Data")
         self.tabs.addTab(self.sequence_workspace, "Sequence")
         self.tabs.addTab(self.camera_panel, "Camera")
+        self.sequence_panel.running_changed.connect(
+            self.update_sequence_tab_state
+        )
         self.fixed_tabs = {
             self.plugin_studio, self.data_workspace,
             self.sequence_workspace, self.camera_panel,
@@ -186,6 +193,83 @@ class MainWindow(QMainWindow):
         self.apply_theme_to_panels(self.theme_manager.current_theme)
         self.update_device_status()
         self.restore_window_layout()
+
+    def update_sequence_tab_state(self, running):
+        index = self.tabs.indexOf(self.sequence_workspace)
+        if index < 0:
+            return
+        self.tabs.setTabText(
+            index, "Sequence (Running)" if running else "Sequence"
+        )
+        self.tabs.tabBar().setTabTextColor(
+            index, QColor("#00e676" if running else "#ffb74d")
+        )
+
+    def set_sequence_recording(self, enabled):
+        was_recording = self.measurement.recording
+        if enabled:
+            self.measurement.start()
+            self.measurement.record_button.setChecked(True)
+            return not was_recording
+        if not was_recording:
+            return False
+        self.measurement.flush_sequence_markers()
+        self.measurement.record_button.setChecked(False)
+        if not self.measurement.rows:
+            return True
+        output_dir = Path(
+            self.window_settings.value(
+                "data/output_dir", str(storage_dir("data"))
+            )
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        recipe_name = self.sequence_panel.recipe_label.text().rstrip(" *")
+        safe_name = "".join(
+            character if character.isalnum() or character in "-_" else "_"
+            for character in recipe_name
+        ).strip("_") or "sequence"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = output_dir / f"{safe_name}_{timestamp}.csv"
+        self.measurement.data_logger.save_csv(
+            path, self.measurement.data_logger.columns
+        )
+        self.log(f"Sequence data saved: {path}")
+        return True
+
+    def sequence_safe_output(self):
+        errors = []
+        for panel in self.experiment_tabs.values():
+            if hasattr(panel, "emergency_stop"):
+                try:
+                    panel.emergency_stop()
+                except Exception as error:
+                    errors.append(f"experiment: {error}")
+        commands = (
+            ("LS331", (("heater_off", None),)),
+            ("K2400", (("output_off", None),)),
+            (
+                "ZUP",
+                (
+                    ("output_off", None),
+                    ("set_voltage", 0.0),
+                    ("set_current", 0.0),
+                ),
+            ),
+        )
+        for device_id, actions in commands:
+            device = self.manager.get_device(device_id)
+            if device is None:
+                continue
+            for method, value in actions:
+                try:
+                    if value is None:
+                        getattr(device, method)()
+                    else:
+                        getattr(device, method)(value)
+                except Exception as error:
+                    errors.append(f"{device_id}.{method}: {error}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
     def _build_header(self):
         header = QWidget()

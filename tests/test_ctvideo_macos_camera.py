@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from gui import panel_ctvideo
+from plugins.devices.ctvideo_3m import video
 from plugins.devices.ctvideo_3m.resolvers import macos
 
 
@@ -230,22 +230,22 @@ class TestCTVideoCaptureBackend(unittest.TestCase):
         )
 
     def test_uses_avfoundation_for_macos_camera_index(self):
-        with patch.object(panel_ctvideo, "cv2", self.cv2), patch.object(
-            panel_ctvideo.sys, "platform", "darwin"
+        with patch.object(video, "cv2", self.cv2), patch.object(
+            video.sys, "platform", "darwin"
         ):
-            self.assertEqual(panel_ctvideo._capture_backend(1), 1200)
+            self.assertEqual(video._capture_backend(1), 1200)
 
     def test_preserves_directshow_for_windows_camera_index(self):
-        with patch.object(panel_ctvideo, "cv2", self.cv2), patch.object(
-            panel_ctvideo.sys, "platform", "win32"
+        with patch.object(video, "cv2", self.cv2), patch.object(
+            video.sys, "platform", "win32"
         ):
-            self.assertEqual(panel_ctvideo._capture_backend(1), 700)
+            self.assertEqual(video._capture_backend(1), 700)
 
     def test_uses_default_backend_for_non_index_source(self):
-        with patch.object(panel_ctvideo, "cv2", self.cv2), patch.object(
-            panel_ctvideo.sys, "platform", "darwin"
+        with patch.object(video, "cv2", self.cv2), patch.object(
+            video.sys, "platform", "darwin"
         ):
-            self.assertEqual(panel_ctvideo._capture_backend("video.mp4"), 0)
+            self.assertEqual(video._capture_backend("video.mp4"), 0)
 
 
 if __name__ == "__main__":

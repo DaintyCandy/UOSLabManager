@@ -2,6 +2,9 @@
 
 import sys
 
+from .d2xx_transport import D2XXSerialAdapter
+from .driver import CTVideo3M
+
 
 def default_connection():
     return "auto" if sys.platform == "darwin" else "COM6"
@@ -9,12 +12,9 @@ def default_connection():
 
 def create_ctvideo(connection, verify=False):
     if sys.platform == "darwin":
-        from .macos_driver import CTVideo3MMacOS
-
-        device = CTVideo3MMacOS(connection)
+        transport = D2XXSerialAdapter(selector=connection)
+        device = CTVideo3M(transport=transport)
     else:
-        from .driver import CTVideo3M
-
         device = CTVideo3M(connection)
 
     if verify:

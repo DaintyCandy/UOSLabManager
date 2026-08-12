@@ -90,8 +90,14 @@ class CTVideo3M:
         ),
     )
 
-    def __init__(self, port: str = "COM6"):
-        self.ser = serial.Serial(
+    def __init__(self, port: str = "COM6", *, transport=None):
+        """Create the protocol driver over pyserial or an injected transport.
+
+        ``transport`` must expose the small serial-like API used below. This
+        keeps the CTvideo command protocol independent from the platform USB
+        transport; macOS supplies a D2XX adapter through ``connection.py``.
+        """
+        self.ser = transport if transport is not None else serial.Serial(
             port=port,
             baudrate=115200,
             bytesize=serial.EIGHTBITS,

@@ -12,6 +12,7 @@ from plugins.devices.ctvideo_3m.d2xx_transport import (
     D2XXSerialAdapter,
     FT_PURGE_RX,
 )
+from plugins.devices.ctvideo_3m.driver import CTVideo3M
 
 
 class FakeD2XX:
@@ -187,8 +188,25 @@ class TestD2XXSerialAdapter(unittest.TestCase):
 
 
 class TestCTVideoConnectionFactory(unittest.TestCase):
-    @patch("plugins.devices.ctvideo_3m.macos_driver.CTVideo3MMacOS")
-    def test_macos_factory_uses_d2xx_driver_and_verifies_reading(self, driver_class):
+    def test_protocol_driver_accepts_injected_serial_transport(self):
+        transport = MagicMock()
+        transport.port = "d2xx://CTLV_TEST"
+        transport.is_open = True
+
+        device = CTVideo3M(transport=transport)
+
+        self.assertIs(device.ser, transport)
+        self.assertEqual(device.get_port(), "d2xx://CTLV_TEST")
+        device.close()
+        transport.close.assert_called_once_with()
+
+    @patch("plugins.devices.ctvideo_3m.connection.CTVideo3M")
+    @patch("plugins.devices.ctvideo_3m.connection.D2XXSerialAdapter")
+    def test_macos_factory_uses_d2xx_transport_and_verifies_reading(
+        self, adapter_class, driver_class
+    ):
+        transport = MagicMock()
+        adapter_class.return_value = transport
         device = MagicMock()
         driver_class.return_value = device
 
@@ -196,11 +214,15 @@ class TestCTVideoConnectionFactory(unittest.TestCase):
             result = connection.create_ctvideo("CTLV_21060012", verify=True)
 
         self.assertIs(result, device)
-        driver_class.assert_called_once_with("CTLV_21060012")
+        adapter_class.assert_called_once_with(selector="CTLV_21060012")
+        driver_class.assert_called_once_with(transport=transport)
         device.read_all.assert_called_once_with()
 
-    @patch("plugins.devices.ctvideo_3m.macos_driver.CTVideo3MMacOS")
-    def test_verification_failure_closes_device(self, driver_class):
+    @patch("plugins.devices.ctvideo_3m.connection.CTVideo3M")
+    @patch("plugins.devices.ctvideo_3m.connection.D2XXSerialAdapter")
+    def test_verification_failure_closes_device(
+        self, adapter_class, driver_class
+    ):
         device = MagicMock()
         device.read_all.side_effect = TimeoutError("no response")
         driver_class.return_value = device

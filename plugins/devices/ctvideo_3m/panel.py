@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
-from gui.panel_ctvideo import CTVideoView
+from .video import CTVideoView
 from .connection import create_ctvideo, default_connection
 from .driver import CTVideo3M
 from .usb_camera import resolve_camera_for_port

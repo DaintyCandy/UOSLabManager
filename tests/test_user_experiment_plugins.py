@@ -77,6 +77,7 @@ class TestUserExperimentPlugins(unittest.TestCase):
         plugins = load_experiment_plugins()
 
         self.assertIn("heating_control", plugins)
+        self.assertIn("line_profile", plugins)
         self.assertNotIn("temperature_sweep", plugins)
         self.assertNotIn("iv_sweep", plugins)
         self.assertIsNotNone(plugins["heating_control"].panel_factory)

@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
-from gui.panel_ctvideo import CTVideoView
+from plugins.devices.ctvideo_3m.video import CTVideoView
 from plugins.devices.ctvideo_3m.connection import create_ctvideo, default_connection
 from plugins.devices.ctvideo_3m.usb_camera import resolve_camera_for_port
 from plugins.devices.zup36_12.driver import ZUP36_12
@@ -396,9 +396,9 @@ class HeatingControlPanel(QWidget):
 
         pid_group = QGroupBox("PID")
         pid_form = QFormLayout(pid_group)
-        self.pid_p = self._spin(0.0, 1000.0, 0.24, 4)
-        self.pid_i = self._spin(0.0, 1000.0, 0.012, 4)
-        self.pid_d = self._spin(0.0, 1000.0, 0.0, 4)
+        self.pid_p = self._spin(0.0, 1000.0, 4.0, 4)
+        self.pid_i = self._spin(0.0, 1000.0, 3.0, 4)
+        self.pid_d = self._spin(0.0, 1000.0, 3.0, 4)
         pid_form.addRow("P [W/°C]", self.pid_p)
         pid_form.addRow("I [W/(°C·s)]", self.pid_i)
         pid_form.addRow("D [W·s/°C]", self.pid_d)
@@ -423,17 +423,11 @@ class HeatingControlPanel(QWidget):
         self.control_status = QLabel("Stopped")
         self.control_status.setStyleSheet("font-weight:bold; color:#e74c3c;")
         self.control_output_label = QLabel("Power command: - / Current command: -")
-        self.start_control_button = QPushButton("Start Heating Control")
-        self.start_control_button.setStyleSheet(
+        self.control_button = QPushButton("Start Heating Control")
+        self.control_button.setStyleSheet(
             "background:#1f8f4e; color:white; font-weight:bold;"
         )
-        self.start_control_button.clicked.connect(self.start_control)
-        self.stop_control_button = QPushButton("Stop")
-        self.stop_control_button.setStyleSheet(
-            "background:#c0392b; color:white; font-weight:bold;"
-        )
-        self.stop_control_button.clicked.connect(self.stop_control)
-        self.stop_control_button.setEnabled(False)
+        self.control_button.clicked.connect(self.toggle_control)
         self.control_setting_widgets = (
             self.target_temperature, self.max_temperature,
             self.current_ramp_enabled, self.current_ramp_rate,
@@ -444,8 +438,7 @@ class HeatingControlPanel(QWidget):
         controls.addWidget(self.control_status)
         controls.addWidget(self.control_output_label)
         controls.addStretch()
-        controls.addWidget(self.start_control_button)
-        controls.addWidget(self.stop_control_button)
+        controls.addWidget(self.control_button)
         layout.addLayout(controls, 2, 0, 1, 2)
         return panel
 
@@ -624,6 +617,12 @@ class HeatingControlPanel(QWidget):
         if self.control_active:
             self.stop_control()
 
+    def toggle_control(self):
+        if self.control_active:
+            self.stop_control()
+        else:
+            self.start_control()
+
     def start_control(self):
         zup = self.manager.get_device("ZUP")
         ctvideo = self.manager.get_device("CTVIDEO3M")
@@ -663,8 +662,10 @@ class HeatingControlPanel(QWidget):
         self.control_active = True
         for widget in self.control_setting_widgets:
             widget.setEnabled(False)
-        self.start_control_button.setEnabled(False)
-        self.stop_control_button.setEnabled(True)
+        self.control_button.setText("Stop Heating Control")
+        self.control_button.setStyleSheet(
+            "background:#c0392b; color:white; font-weight:bold;"
+        )
         self.control_worker = HeatingPIDWorker(self.manager, config, self)
         self.control_worker.status_changed.connect(self.update_control_status)
         self.control_worker.output_changed.connect(self.update_control_output)
@@ -678,10 +679,11 @@ class HeatingControlPanel(QWidget):
         if worker is None or not worker.isRunning():
             self.control_active = False
             self.update_control_status("Stopped")
+            self._set_control_button_stopped()
             return
         worker.requestInterruption()
         self.control_status.setText("Stopping / Safe output reset")
-        self.stop_control_button.setEnabled(False)
+        self.control_button.setEnabled(False)
         if wait and not worker.wait(4000):
             self.log("Heating control thread did not stop within 4 seconds")
 
@@ -714,12 +716,18 @@ class HeatingControlPanel(QWidget):
         self.control_active = False
         for widget in self.control_setting_widgets:
             widget.setEnabled(True)
-        self.start_control_button.setEnabled(True)
-        self.stop_control_button.setEnabled(False)
+        self._set_control_button_stopped()
         self.update_control_status("Stopped")
         if not self.control_safety_reason:
             self.log("Heating control stopped; output OFF, voltage/current reset to 0")
         worker.deleteLater()
+
+    def _set_control_button_stopped(self):
+        self.control_button.setText("Start Heating Control")
+        self.control_button.setStyleSheet(
+            "background:#1f8f4e; color:white; font-weight:bold;"
+        )
+        self.control_button.setEnabled(True)
 
     def refresh(self):
         self._handle_lost_connections()
