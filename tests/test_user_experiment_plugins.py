@@ -4,12 +4,37 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from core.plugin_manager import (
-    _seed_plugins, export_experiment_plugin, import_experiment_plugin,
+    _migrate_legacy_bundled_plugins, _seed_plugins,
+    export_experiment_plugin, import_experiment_plugin,
     load_experiment_plugins,
 )
 
 
 class TestUserExperimentPlugins(unittest.TestCase):
+    def test_obsolete_heating_panel_is_backed_up_and_migrated(self):
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
+            source = Path(source_directory)
+            destination = Path(destination_directory)
+            relative = Path("experiments/heating_control/panel.py")
+            (source / relative).parent.mkdir(parents=True)
+            (destination / relative).parent.mkdir(parents=True)
+            (source / relative).write_text("latest panel\n", encoding="utf-8")
+            legacy = "from gui.panel_ctvideo import CTVideoView\n"
+            (destination / relative).write_text(legacy, encoding="utf-8")
+
+            _migrate_legacy_bundled_plugins(source, destination)
+
+            self.assertEqual(
+                (destination / relative).read_text(encoding="utf-8"),
+                "latest panel\n",
+            )
+            self.assertEqual(
+                (destination / relative).with_suffix(".py.legacy-backup").read_text(
+                    encoding="utf-8"
+                ),
+                legacy,
+            )
+
     @staticmethod
     def _write_portable_plugin(root, plugin_id="portable"):
         plugin_dir = root / plugin_id

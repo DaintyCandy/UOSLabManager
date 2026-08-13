@@ -359,7 +359,16 @@ class MainWindow(QMainWindow):
         if plugin.panel_factory is not None:
             panel = self.experiment_tabs.get(experiment_id)
             if panel is None:
-                panel = plugin.panel_factory(self.manager, self)
+                try:
+                    panel = plugin.panel_factory(self.manager, self)
+                except Exception as error:
+                    message = (
+                        f"Could not open {plugin.display_name}:\n\n{error}"
+                    )
+                    QMessageBox.critical(self, "Experiment plugin failed", message)
+                    self.plugin_studio.codex_panel.set_activity(message)
+                    self.log(message.replace("\n", " "))
+                    return
                 self.experiment_tabs[experiment_id] = panel
                 container = QScrollArea()
                 container.setWidgetResizable(True)

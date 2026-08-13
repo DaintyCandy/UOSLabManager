@@ -120,6 +120,7 @@ def get_plugin_root() -> Path:
         bundled_root = Path(getattr(sys, "_MEIPASS", "")) / "plugins"
         _seed_plugins(legacy_root, destination)
         _seed_plugins(bundled_root, destination)
+        _migrate_legacy_bundled_plugins(bundled_root, destination)
         return destination.resolve()
 
     return Path(__file__).resolve().parents[1] / "plugins"
@@ -248,6 +249,31 @@ def _seed_plugins(source: Path, destination: Path) -> None:
         elif not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target)
+
+
+def _migrate_legacy_bundled_plugins(source: Path, destination: Path) -> None:
+    """Replace known incompatible bundled defaults while preserving a backup."""
+    migrations = (
+        (
+            Path("experiments/heating_control/panel.py"),
+            "from gui.panel_ctvideo import CTVideoView",
+        ),
+    )
+    for relative, obsolete_marker in migrations:
+        source_path = source / relative
+        target = destination / relative
+        if not source_path.is_file() or not target.is_file():
+            continue
+        try:
+            current = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if obsolete_marker not in current:
+            continue
+        backup = target.with_suffix(target.suffix + ".legacy-backup")
+        if not backup.exists():
+            shutil.copy2(target, backup)
+        shutil.copy2(source_path, target)
 
 
 def _load_user_experiment_plugin(manifest_path: Path) -> ExperimentPlugin | None:
