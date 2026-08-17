@@ -9,7 +9,7 @@ from core.data_logger import DataLogger
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
+    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -18,17 +18,27 @@ from .widget_graph_selection import GraphSelectionTree
 
 class MeasurementPanels:
     COLORS = ("#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b")
-    GRAPH_BUFFER_POINTS = 3600
-    TABLE_BUFFER_ROWS = 1000
+    DEFAULT_UPDATE_INTERVAL_MS = 1000
+    DEFAULT_BUFFER_ROWS = 10_000
     LOG_BUFFER_LINES = 2000
 
     def __init__(self, manager, plugins, log_callback):
         self.manager = manager
         self.plugins = plugins
         self.log = log_callback
-        self.get_rheed_profile = lambda: None 
+        self.settings = QSettings("UOSLabManager", "UOSLabManager")
+        self.update_interval_ms = max(
+            50,
+            int(self.settings.value(
+                "data/update_interval_ms", self.DEFAULT_UPDATE_INTERVAL_MS
+            )),
+        )
+        self.buffer_rows = max(
+            100,
+            int(self.settings.value("data/buffer_rows", self.DEFAULT_BUFFER_ROWS)),
+        )
         self.t0 = time.time()
-        self.times = deque(maxlen=self.GRAPH_BUFFER_POINTS)
+        self.times = deque(maxlen=self.buffer_rows)
         self.series = {}
         self.curves = {}
         self.curve_colors = {}
@@ -43,12 +53,15 @@ class MeasurementPanels:
             for column in plugin.columns:
                 self.columns.append(column.label)
                 self.column_devices[column.label] = device_id
-                self.series[column.label] = deque(maxlen=self.GRAPH_BUFFER_POINTS)
-        self.data_logger = DataLogger(self.columns)
+                self.series[column.label] = deque(maxlen=self.buffer_rows)
+        self.data_logger = DataLogger(
+            self.columns + ["sequence_marker"], max_rows=self.buffer_rows
+        )
         self.rows = self.data_logger.rows
+        self.pending_sequence_markers = []
         self.recording = False
         self.timer = QTimer()
-        self.timer.setInterval(1000)
+        self.timer.setInterval(self.update_interval_ms)
         self.timer.timeout.connect(self.update)
         self.graph_widget = self._build_graph_widget()
         self.table_widget = self._build_table_widget()
@@ -139,6 +152,27 @@ class MeasurementPanels:
         layout = QVBoxLayout(panel)
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Data Table"))
+        controls.addWidget(QLabel("Update (ms)"))
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(50, 60_000)
+        self.interval_spin.setSingleStep(50)
+        self.interval_spin.setValue(self.update_interval_ms)
+        self.interval_spin.setToolTip(
+            "Sampling interval for the table, graph, and recording"
+        )
+        self.interval_spin.valueChanged.connect(self.set_update_interval)
+        controls.addWidget(self.interval_spin)
+        controls.addWidget(QLabel("Buffer rows"))
+        self.buffer_spin = QSpinBox()
+        self.buffer_spin.setRange(100, 1_000_000)
+        self.buffer_spin.setSingleStep(1000)
+        self.buffer_spin.setValue(self.buffer_rows)
+        self.buffer_spin.setToolTip(
+            "Maximum rows retained in memory; oldest rows are discarded"
+        )
+        self.buffer_spin.valueChanged.connect(self.set_buffer_rows)
+        controls.addWidget(self.buffer_spin)
+        controls.addStretch()
         self.record_button = QPushButton("Start Recording")
         self.record_button.setCheckable(True)
         self.record_button.toggled.connect(self.set_recording)
@@ -202,6 +236,30 @@ class MeasurementPanels:
         if not self.timer.isActive():
             self.timer.start()
 
+    def set_update_interval(self, interval_ms):
+        self.update_interval_ms = max(50, int(interval_ms))
+        self.timer.setInterval(self.update_interval_ms)
+        self.settings.setValue("data/update_interval_ms", self.update_interval_ms)
+
+    def set_buffer_rows(self, max_rows):
+        self.buffer_rows = max(100, int(max_rows))
+        self.settings.setValue("data/buffer_rows", self.buffer_rows)
+        self.times = deque(self.times, maxlen=self.buffer_rows)
+        for label, values in tuple(self.series.items()):
+            self.series[label] = deque(values, maxlen=self.buffer_rows)
+        self.data_logger.set_max_rows(self.buffer_rows)
+        self.rows = self.data_logger.rows
+        while self.table.rowCount() > self.buffer_rows:
+            self.table.removeRow(0)
+        self._refresh_curves()
+
+    def _refresh_curves(self):
+        times = list(self.times)
+        for label, values in self.series.items():
+            samples = list(values)
+            for curves in self.plot_curves:
+                curves[label].setData(times, samples)
+
     def set_theme(self, theme):
         dark = theme == "dark"
         foreground = "#e8eaed" if dark else "#202124"
@@ -225,7 +283,12 @@ class MeasurementPanels:
         if alarm and alarm != "AL00000":
             self.log(f"ZUP ALARM DETECTED: {alarm}")
             
-        row = {"datetime": datetime.now().isoformat(timespec="seconds"), "elapsed_s": time.time() - self.t0}
+        row = {
+            "datetime": datetime.now().isoformat(timespec="seconds"),
+            "elapsed_s": time.time() - self.t0,
+            "sequence_marker": " | ".join(self.pending_sequence_markers),
+        }
+        self.pending_sequence_markers.clear()
         for device_id, plugin in self.plugins.items():
             values = data.get(device_id, {})
             for column in plugin.columns:
@@ -233,12 +296,10 @@ class MeasurementPanels:
 
         # ========================================================
         # [핵심 1] 카메라 패널에서 방금 찍힌 1D 픽셀 배열을 가져옵니다.
-        profile = self.get_rheed_profile() if self.recording else None
-        
         # [핵심 2] DataLogger에 온도 데이터(row)와 픽셀 데이터(profile)를 "세트"로 넘깁니다!
         # 기존 코드: self.rows.append(row)   <-- 이 줄을 지우고 아래 줄로 바꿉니다.
         if self.recording:
-            self.data_logger.append(row, rheed_profile=profile)
+            self.data_logger.append(row)
         # ========================================================
 
         # (이하 화면의 그래프와 표를 업데이트하는 기존 코드는 동일하게 유지)
@@ -251,11 +312,10 @@ class MeasurementPanels:
             except (TypeError, ValueError):
                 numeric = float("nan")
             self.series[label].append(numeric)
-            for curves in self.plot_curves:
-                curves[label].setData(list(self.times), list(self.series[label]))
+        self._refresh_curves()
 
     def _append_table_row(self, row):
-        while self.table.rowCount() >= self.TABLE_BUFFER_ROWS:
+        while self.table.rowCount() >= self.buffer_rows:
             self.table.removeRow(0)
         table_row = self.table.rowCount()
         self.table.insertRow(table_row)
@@ -275,14 +335,33 @@ class MeasurementPanels:
         default_path = os.path.join(output_directory, "experiment_data.csv")
         path, _ = QFileDialog.getSaveFileName(self.table, "Save Data", default_path, "CSV Files (*.csv)")
         if path:
-            self.data_logger.save_csv(path, self.selected_columns())
+            self.data_logger.save_csv(
+                path, self.selected_columns() + ["sequence_marker"]
+            )
             self.log(f"Saved selected CSV: {path}")
+
+    def add_sequence_marker(self, marker):
+        marker = str(marker).strip()
+        if marker:
+            self.pending_sequence_markers.append(marker)
+
+    def flush_sequence_markers(self):
+        if not self.pending_sequence_markers:
+            return
+        if self.rows:
+            marker = " | ".join(self.pending_sequence_markers)
+            existing = self.rows[-1].get("sequence_marker", "")
+            self.rows[-1]["sequence_marker"] = " | ".join(
+                value for value in (existing, marker) if value
+            )
+        self.pending_sequence_markers.clear()
 
     def set_recording(self, enabled):
         self.recording = bool(enabled)
         self.record_button.setText("Stop Recording" if enabled else "Start Recording")
         if enabled:
             self.data_logger.clear()
+            self.pending_sequence_markers.clear()
             self.log("Data recording started")
         else:
             self.log(f"Data recording stopped ({len(self.rows)} rows captured)")

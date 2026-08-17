@@ -592,6 +592,11 @@ class CodexPanel(QWidget):
                 "Keep `plugin.py` exporting a `DevicePlugin` instance. Device packages "
                 "normally contain `driver.py`, `panel.py`, and `plugin.py`. The driver "
                 "must implement `read_all()` returning a dictionary and `close()`. "
+                "Optional sequence commands belong in the DevicePlugin's "
+                "`sequence_commands` tuple. Declare each command with "
+                "`SequenceCommand` metadata and an executor accepting "
+                "`(device, value, context)`; do not add device dispatch branches to "
+                "the sequence GUI. "
                 "Panels must safely stop timers and threads in `shutdown()`. Do not "
                 "send commands to real hardware while editing or validating.\n"
             )

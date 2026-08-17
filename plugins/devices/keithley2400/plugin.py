@@ -1,9 +1,21 @@
-from core.plugin_manager import DataColumn, DevicePlugin
+from core.plugin_manager import DataColumn, DevicePlugin, SequenceCommand
 
 
 def create_settings_panel(manager, parent):
     from .panel import Keithley2400Panel
     return Keithley2400Panel(manager, plugin, parent)
+
+
+def set_voltage(device, value, _context):
+    device.set_voltage_source(value)
+
+
+def output_on(device, _value, _context):
+    device.output_on()
+
+
+def output_off(device, _value, _context):
+    device.output_off()
 
 
 class Keithley2400Plugin(DevicePlugin):
@@ -19,6 +31,21 @@ class Keithley2400Plugin(DevicePlugin):
         DataColumn("resistance_Ohm", "K2400_resistance_Ohm"),
     )
     settings_factory = staticmethod(create_settings_panel)
+    sequence_commands = (
+        SequenceCommand(
+            key="Set Voltage", label="Set Voltage", unit="V", minimum=-200.0,
+            maximum=200.0, default=0.0, decimals=4,
+            settle_seconds=0.3, executor=set_voltage,
+        ),
+        SequenceCommand(
+            key="Output On", label="Output On", requires_value=False,
+            settle_seconds=0.3, executor=output_on,
+        ),
+        SequenceCommand(
+            key="Output Off", label="Output Off", requires_value=False,
+            settle_seconds=0.3, executor=output_off,
+        ),
+    )
 
     def connect(self, connection: str):
         from .driver import Keithley2400

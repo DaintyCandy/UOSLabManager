@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from plugins.devices.ctvideo_3m.video_display import (
+from .video_display import (
     CompactConnectVideoDisplaySettings,
     process_frame,
 )
@@ -366,7 +366,7 @@ class CTVideoWorker(QThread):
         controller = None
         try:
             try:
-                from plugins.devices.ctvideo_3m.compactconnect_camera import (
+                from .compactconnect_camera import (
                     CompactConnectCameraController,
                 )
                 controller = CompactConnectCameraController.from_camera_info(

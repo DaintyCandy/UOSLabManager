@@ -9,7 +9,7 @@ from plugins.devices.ctvideo_3m.video_display import (
     canonical_video_display_profile,
     process_frame,
 )
-from gui.panel_ctvideo import CTVideoView, CTVideoWorker
+from plugins.devices.ctvideo_3m.video import CTVideoView, CTVideoWorker
 
 
 SOFTWARE_DISPLAY_KEYS = {

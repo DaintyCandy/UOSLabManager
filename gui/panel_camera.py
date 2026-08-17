@@ -63,7 +63,8 @@ class CameraPanel(QWidget):
         self.preview_active = False
         
         # --- [RHEED 1D 추출용 변수] ---
-        self.latest_profile = None 
+        self.latest_frame = None
+        self.frame_sequence = 0
 
         self._build_ui()
 
@@ -111,20 +112,12 @@ class CameraPanel(QWidget):
         self.preview_stack.setContentsMargins(0, 0, 0, 0)
         
         # --- [추가] 2. RHEED ROI(관심영역) 설정 UI ---
-        roi_layout = QHBoxLayout()
-        roi_layout.addWidget(QLabel("ROI Center Y(%):"))
+        roi_layout = None
         self.roi_y_spin = QDoubleSpinBox()
-        self.roi_y_spin.setRange(0, 100)
-        self.roi_y_spin.setValue(50.0) # 기본 화면 정중앙
-        roi_layout.addWidget(self.roi_y_spin)
-        
-        roi_layout.addWidget(QLabel("ROI Height(%):"))
         self.roi_h_spin = QDoubleSpinBox()
-        self.roi_h_spin.setRange(1, 100)
+        self.roi_y_spin.setValue(50.0) # 기본 화면 정중앙
+        
         self.roi_h_spin.setValue(10.0) # 화면 높이의 10% 두께
-        roi_layout.addWidget(self.roi_h_spin)
-        roi_layout.addStretch()
-        body.addLayout(roi_layout)
         # ----------------------------------------
 
         # 3. 프리뷰 화면
@@ -363,6 +356,8 @@ class CameraPanel(QWidget):
     def update_frame(self, frame):
         if not self.preview_active:
             return
+        self.latest_frame = frame.copy()
+        self.frame_sequence += 1
         self.preview_stack.setCurrentWidget(self.preview)
         now = time.perf_counter()
         if self.last_frame_at is not None:
@@ -386,14 +381,7 @@ class CameraPanel(QWidget):
             
         # --- [추가] RHEED 1D 프로파일 추출 (Vertical Projection) ---
         height, width = frame.shape[:2]
-        center_pct = self.roi_y_spin.value() / 100.0
-        height_pct = self.roi_h_spin.value() / 100.0
-        
-        y_center = int(height * center_pct)
-        h_pixels = int(height * height_pct)
-        
-        y1 = max(0, y_center - h_pixels // 2)
-        y2 = min(height, y_center + h_pixels // 2)
+        y1 = y2 = 0
 
         # 흑백으로 변환 후 해당 영역(ROI)을 세로(axis=0)로 평균 냄
         if y2 > y1:
@@ -405,7 +393,6 @@ class CameraPanel(QWidget):
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # 추출 영역을 녹색 박스로 렌더링 (사용자 시각적 확인용)
-        cv2.rectangle(rgb, (0, y1), (width - 1, y2), (0, 255, 0), 2)
         # --------------------------------------------------------
 
         bytes_per_line = 3 * width
@@ -434,6 +421,14 @@ class CameraPanel(QWidget):
 
     def get_latest_profile(self):
         return self.latest_profile
+
+    def get_latest_frame(self):
+        return None if self.latest_frame is None else self.latest_frame.copy()
+
+    def get_frame_packet(self):
+        if not self.preview_active or self.latest_frame is None:
+            return None, self.frame_sequence
+        return self.latest_frame.copy(), self.frame_sequence
 
 
 class CameraWorkspace(QWidget):
@@ -507,3 +502,11 @@ class CameraWorkspace(QWidget):
     # 데이터 로거가 프로파일을 가져갈 수 있게 하는 함수
     def get_latest_profile(self):
         return self.primary.get_latest_profile()
+
+    def get_latest_frame(self, camera_index=0):
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        return panel.get_latest_frame()
+
+    def get_frame_packet(self, camera_index=0):
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        return panel.get_frame_packet()

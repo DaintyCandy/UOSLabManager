@@ -12,6 +12,19 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+## Sequence architecture
+
+Sequence recipes are validated and executed by the Qt-independent
+`core.sequence_engine.SequenceEngine`. The sequence panel is an editor and Qt
+adapter only; it starts the engine on a worker thread so waits and instrument
+commands do not freeze the interface.
+
+Device sequence commands are declared by each `DevicePlugin` with
+`SequenceCommand` metadata (label, unit, range, choices, and executor). Adding a
+command therefore does not require editing `gui/panel_sequence.py`. Executors
+receive `(device, value, context)`; the context provides cancellation-aware
+waiting, logging, and per-run state.
+
 ## Building the Windows executable
 
 ```powershell
