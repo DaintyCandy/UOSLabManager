@@ -55,6 +55,7 @@ a = Analysis(
     datas=[
         ('LICENSE', '.'),
         ('THIRD_PARTY_NOTICES.md', '.'),
+        ('assets/uoslabmanager_icon.png', 'assets'),
         *third_party_license_files,
         *codex_datas,
     ],
@@ -83,6 +84,7 @@ exe = EXE(
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
+    icon='assets/uoslabmanager_icon.ico',
     codesign_identity=None,
     entitlements_file=None,
 )
