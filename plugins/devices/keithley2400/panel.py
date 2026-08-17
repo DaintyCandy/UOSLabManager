@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .driver import Keithley2400
+from gui.widget_busy_spinner import run_busy_task
 
 
 class Keithley2400Panel(QWidget):
@@ -166,24 +167,68 @@ class Keithley2400Panel(QWidget):
     def connect_device(self):
         if self.get_device() is not None:
             return
-        try:
-            address = self.address_input.text().strip()
+        address = self.address_input.text().strip()
+
+        def connect():
             self.manager.add_device("K2400", lambda: Keithley2400(address))
+            try:
+                return self.get_device().read_settings()
+            except Exception:
+                self.manager.remove_device("K2400")
+                raise
+
+        def connected(values):
+            self._apply_device_settings(values)
             self.log("Connected")
             self.monitor_timer.start()
             self._notify_main()
-            self.read_device()
-        except Exception as error:
+
+        def failed(error):
+            if self.get_device() is not None:
+                run_busy_task(
+                    self, lambda: self.manager.remove_device("K2400"),
+                    lambda _result: self._notify_main(),
+                    lambda cleanup_error: self.log(str(cleanup_error)),
+                    key="connection_cleanup",
+                )
             self.show_error(error)
+
+        run_busy_task(
+            self, connect, connected, failed,
+            key="connection",
+        )
 
     def disconnect_device(self):
         device = self.get_device()
-        if device and self.output_off_disconnect.isChecked():
-            device.output_off()
-        self.manager.remove_device("K2400")
-        self.monitor_timer.stop()
-        self.log("Disconnected")
-        self._notify_main()
+        if device is None:
+            return
+        output_off = self.output_off_disconnect.isChecked()
+
+        def disconnect():
+            error = None
+            try:
+                if output_off:
+                    device.output_off()
+            except Exception as caught:
+                error = caught
+            finally:
+                self.manager.remove_device("K2400")
+            if error is not None:
+                raise error
+
+        def disconnected(_result):
+            self.monitor_timer.stop()
+            self.log("Disconnected")
+            self._notify_main()
+
+        def failed(error):
+            disconnected(None)
+            self.show_error(error)
+
+        run_busy_task(
+            self, disconnect, disconnected, failed,
+            key="connection",
+        )
 
     def refresh_monitoring(self):
         device = self.get_device()
@@ -209,36 +254,61 @@ class Keithley2400Panel(QWidget):
             self.monitor_labels["compliance"].setText(", ".join(flags) if flags else "OK")
             self.monitor_labels["communication"].setText(state["error"] or "OK")
             if state["compliance"] and self.block_on_compliance.isChecked() and state["output_on"]:
-                device.output_off()
-                self.log("Safety interlock: output disabled by compliance")
+                run_busy_task(
+                    self,
+                    device.output_off,
+                    lambda _result: self.log(
+                        "Safety interlock: output disabled by compliance"
+                    ),
+                    lambda error: self.log(f"Safety interlock failed: {error}"),
+                    key="safety_interlock",
+                )
             self.update_realtime_status()
         except Exception as error:
             self.monitor_labels["communication"].setText(str(error))
             self.monitor_timer.stop()
-            self.manager.remove_device("K2400")
-            self.sync_connection_status()
-            self.log(f"Connection lost; changed to Disconnected: {error}")
-            if self.main_window:
-                self.main_window.update_device_status()
+            message = f"Connection lost; changed to Disconnected: {error}"
+
+            def removed(_result):
+                self.sync_connection_status()
+                self.log(message)
+                if self.main_window:
+                    self.main_window.update_device_status()
+
+            run_busy_task(
+                self, lambda: self.manager.remove_device("K2400"),
+                removed, lambda remove_error: self.log(str(remove_error)),
+                key="connection_lost",
+            )
 
     def read_device(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            values = self.get_device().read_settings()
-            self.source_mode.setCurrentIndex(max(0, self.source_mode.findData(values["source_mode"])))
-            self.update_source_limits()
-            self.source_level.setValue(values["source_level"])
-            self.compliance_limit.setValue(values["compliance"])
-            self.output_enabled.setChecked(values["output"])
-            self.nplc.setValue(values["nplc"])
-            self.remote_sense.setChecked(values["remote_sense"])
-            self.snapshot = deepcopy(self.profile_data())
-            self.refresh_monitoring()
-            self.log("Device settings read")
-        except Exception as error:
-            self.show_error(error)
+        run_busy_task(
+            self,
+            device.read_settings,
+            lambda values: (
+                self._apply_device_settings(values),
+                self.log("Device settings read"),
+            ),
+            self.show_error,
+            key="device_action",
+        )
+
+    def _apply_device_settings(self, values):
+        self.source_mode.setCurrentIndex(
+            max(0, self.source_mode.findData(values["source_mode"]))
+        )
+        self.update_source_limits()
+        self.source_level.setValue(values["source_level"])
+        self.compliance_limit.setValue(values["compliance"])
+        self.output_enabled.setChecked(values["output"])
+        self.nplc.setValue(values["nplc"])
+        self.remote_sense.setChecked(values["remote_sense"])
+        self.snapshot = deepcopy(self.profile_data())
+        self.refresh_monitoring()
 
     def apply_settings(self):
         device = self.get_device()
@@ -253,32 +323,51 @@ class Keithley2400Panel(QWidget):
         if source_voltage > self.max_voltage.value() or source_current > self.max_current.value() or source_voltage * source_current > self.max_power.value():
             self.show_error("Source setting exceeds the Safety limits.")
             return
-        try:
+        high_impedance = self.high_impedance_off.isChecked()
+        nplc = self.nplc.value()
+        remote_sense = self.remote_sense.isChecked()
+        auto_range = self.auto_range.isChecked()
+        output_enabled = self.output_enabled.isChecked()
+
+        def apply():
             device.output_off()
-            if self.high_impedance_off.isChecked():
+            if high_impedance:
                 device.write(":OUTP:SMOD HIMP")
             if mode == "VOLT":
                 device.set_voltage_source(level, compliance)
             else:
                 device.set_current_source(level, compliance)
-            device.set_nplc(self.nplc.value())
-            device.set_remote_sense(self.remote_sense.isChecked())
+            device.set_nplc(nplc)
+            device.set_remote_sense(remote_sense)
             sense = "CURR" if mode == "VOLT" else "VOLT"
-            device.write(f":SENS:{sense}:RANG:AUTO {'ON' if self.auto_range.isChecked() else 'OFF'}")
-            if self.output_enabled.isChecked():
+            device.write(
+                f":SENS:{sense}:RANG:AUTO {'ON' if auto_range else 'OFF'}"
+            )
+            if output_enabled:
                 device.output_on()
+
+        def applied(_result):
             self.snapshot = deepcopy(self.profile_data())
             self.refresh_monitoring()
             self.log("Settings applied")
-        except Exception as error:
-            self.show_error(error)
+
+        run_busy_task(
+            self, apply, applied, self.show_error,
+            key="device_action",
+        )
 
     def clear_errors(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
-        self.get_device().write("*CLS")
-        self.log("Status and error queue cleared")
+        run_busy_task(
+            self,
+            lambda: device.write("*CLS"),
+            lambda _result: self.log("Status and error queue cleared"),
+            self.show_error,
+            key="device_action",
+        )
 
     def profile_data(self):
         return {

@@ -18,6 +18,7 @@ from .connection import create_ctvideo, default_connection
 from .driver import CTVideo3M
 from .usb_camera import resolve_camera_for_port
 from .video_display import CompactConnectVideoDisplaySettings
+from gui.widget_busy_spinner import run_busy_task
 
 
 class CTVideo3MPanel(QWidget):
@@ -592,15 +593,40 @@ class CTVideo3MPanel(QWidget):
         self._invalidate_calibration_snapshot(
             "Read calibration after connecting to verify the device identity."
         )
-        try:
-            port = self.port_input.text().strip()
-            interval = 1.0 / self.refresh_rate.value()
-            self.manager.add_device(
-                "CTVIDEO3M",
-                lambda: create_ctvideo(port, verify=True),
-                interval=interval,
-            )
-            device_info = self._resolve_camera_info(port)
+        port = self.port_input.text().strip()
+        interval = 1.0 / self.refresh_rate.value()
+
+        def connect():
+            try:
+                self.manager.add_device(
+                    "CTVIDEO3M",
+                    lambda: create_ctvideo(port, verify=True),
+                    interval=interval,
+                )
+                try:
+                    camera_info, camera_error = resolve_camera_for_port(port), None
+                except Exception as caught:
+                    camera_info, camera_error = ({
+                        "PortName": port,
+                        "CameraIndex": 1,
+                        "CameraName": "CTvideo OpenCV fallback",
+                        "CameraDevicePath": "OpenCV preferred index 1 with recovery",
+                    }, caught)
+                settings = self.get_device().read_settings()
+                return camera_info, camera_error, settings
+            except Exception:
+                if self.get_device() is not None:
+                    self.manager.remove_device("CTVIDEO3M")
+                raise
+
+        def connected(result):
+            device_info, camera_error, settings = result
+            self._apply_device_settings(settings)
+            if camera_error is not None:
+                self.log(
+                    f"Camera mapping failed ({camera_error}); "
+                    "starting automatic OpenCV source recovery."
+                )
             self._show_connection_addresses(device_info)
             self._video_attach_attempted = True
             if not self.video_view.start_preview(
@@ -614,16 +640,27 @@ class CTVideo3MPanel(QWidget):
                 f"{device_info['CameraName']} [{device_info['CameraIndex']}]"
             )
             self._notify_main()
-            self.read_device()
-        except Exception as error:
+            self.read_camera_hardware_settings()
+
+        def failed(error):
             self.video_view.stop_preview()
             if self.get_device() is not None:
-                self.manager.remove_device("CTVIDEO3M")
+                run_busy_task(
+                    self, lambda: self.manager.remove_device("CTVIDEO3M"),
+                    lambda _result: self._notify_main(),
+                    lambda cleanup_error: self.log(str(cleanup_error)),
+                    key="connection_cleanup",
+                )
             self._invalidate_calibration_snapshot(
                 "Connection failed; calibration writes are disabled."
             )
             self._notify_main()
             self.show_error(error)
+
+        run_busy_task(
+            self, connect, connected, failed,
+            key="connection",
+        )
 
     def _resolve_camera_info(self, port):
         try:
@@ -664,15 +701,29 @@ class CTVideo3MPanel(QWidget):
             self.log(f"Camera preview attach failed: {error}")
 
     def disconnect_device(self):
-        self.manager.remove_device("CTVIDEO3M")
+        if self.get_device() is None:
+            return
         self.monitor_timer.stop()
         self.stop_video()
         self._video_attach_attempted = False
         self._invalidate_calibration_snapshot(
             "Disconnected. Reconnect and read calibration before writing."
         )
-        self.log("Pyrometer communication disconnected")
-        self._notify_main()
+        def disconnected(_result):
+            self.log("Pyrometer communication disconnected")
+            self._notify_main()
+
+        def failed(error):
+            disconnected(None)
+            self.show_error(error)
+
+        run_busy_task(
+            self,
+            lambda: self.manager.remove_device("CTVIDEO3M"),
+            disconnected,
+            failed,
+            key="connection",
+        )
 
     def stop_video(self):
         self.video_view.stop_preview()
@@ -1001,8 +1052,8 @@ class CTVideo3MPanel(QWidget):
         self._calibration_busy = True
         self.calibration_status_label.setText("Reading calibration and device identity...")
         self._update_calibration_actions()
-        try:
-            snapshot = device.read_calibration()
+
+        def completed(snapshot):
             self.calibration_snapshot = snapshot
             self._show_calibration_snapshot(snapshot, populate_proposed=True)
             self.calibration_offset_readback.setText("Current value read from device")
@@ -1017,16 +1068,22 @@ class CTVideo3MPanel(QWidget):
                 f"{self._format_tweak_offset(snapshot.tweak_offset_C)}, gain "
                 f"{self._format_tweak_gain(snapshot.tweak_gain)}"
             )
-            return True
-        except Exception as error:
+            self._calibration_busy = False
+            self._update_calibration_actions()
+
+        def failed(error):
             self._invalidate_calibration_snapshot(
                 "Calibration read failed; no calibration write is allowed."
             )
-            self.show_error(error)
-            return False
-        finally:
             self._calibration_busy = False
             self._update_calibration_actions()
+            self.show_error(error)
+
+        run_busy_task(
+            self, device.read_calibration, completed, failed,
+            key="device_action",
+        )
+        return True
 
     def apply_calibration(self):
         device = self.get_device()
@@ -1086,10 +1143,8 @@ class CTVideo3MPanel(QWidget):
             "Checking the snapshot, writing once, and verifying read-back..."
         )
         self._update_calibration_actions()
-        try:
-            result = device.apply_calibration(
-                snapshot, proposed, confirmed=True
-            )
+
+        def completed(result):
             self._show_calibration_snapshot(result.after, populate_proposed=False)
             field_rows = (
                 (
@@ -1122,26 +1177,36 @@ class CTVideo3MPanel(QWidget):
                     f"{self._format_tweak_offset(result.after.tweak_offset_C)}, "
                     f"gain {self._format_tweak_gain(result.after.tweak_gain)}"
                 )
-                return True
+            else:
+                self.calibration_snapshot = None
+                self.calibration_ack.setChecked(False)
+                self.calibration_status_label.setText(
+                    "Calibration read-back mismatch. Read calibration again before "
+                    "any further write."
+                )
+                self.log("Calibration write was not fully verified")
+            self._calibration_busy = False
+            self._update_calibration_actions()
 
-            self.calibration_snapshot = None
-            self.calibration_ack.setChecked(False)
-            self.calibration_status_label.setText(
-                "Calibration read-back mismatch. Read calibration again before "
-                "any further write."
-            )
-            self.log("Calibration write was not fully verified")
-            return False
-        except Exception as error:
+        def failed(error):
             self._invalidate_calibration_snapshot(
                 "Calibration write state is uncertain. Read calibration again "
                 "before any further write."
             )
-            self.show_error(error)
-            return False
-        finally:
             self._calibration_busy = False
             self._update_calibration_actions()
+            self.show_error(error)
+
+        run_busy_task(
+            self,
+            lambda: device.apply_calibration(
+                snapshot, proposed, confirmed=True
+            ),
+            completed,
+            failed,
+            key="device_action",
+        )
+        return True
 
     def _show_connection_addresses(self, info):
         self.port_address_label.setText(info.get("PortInstanceId") or "-")
@@ -1195,41 +1260,60 @@ class CTVideo3MPanel(QWidget):
                 self.plot_values[key] = self.plot_values[key][first:]
 
     def read_device(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the pyrometer first.")
             return
-        try:
-            values = self.get_device().read_settings()
-            self.emissivity.setValue(values["emissivity"])
-            self.transmission.setValue(values["transmission"])
-            self.average_time.setValue(values["average_time_s"])
-            self.smart_averaging.setChecked(values["smart_averaging"])
-            self.peak_hold.setValue(values["peak_hold_s"])
-            self.snapshot = deepcopy(self.profile_data())
-            self.log("Device settings read")
-            self.read_camera_hardware_settings()
-        except Exception as error:
-            self.show_error(error)
+        run_busy_task(
+            self,
+            device.read_settings,
+            lambda values: (
+                self._apply_device_settings(values),
+                self.log("Device settings read"),
+                self.read_camera_hardware_settings(),
+            ),
+            self.show_error,
+            key="device_action",
+        )
+
+    def _apply_device_settings(self, values):
+        self.emissivity.setValue(values["emissivity"])
+        self.transmission.setValue(values["transmission"])
+        self.average_time.setValue(values["average_time_s"])
+        self.smart_averaging.setChecked(values["smart_averaging"])
+        self.peak_hold.setValue(values["peak_hold_s"])
+        self.snapshot = deepcopy(self.profile_data())
 
     def apply_settings(self):
         device = self.get_device()
         if device is None:
             self.show_error("Connect the pyrometer first.")
             return
-        try:
-            device.set_emissivity(self.emissivity.value())
-            device.set_transmission(self.transmission.value())
-            device.set_average_time(self.average_time.value())
-            device.set_smart_averaging(self.smart_averaging.isChecked())
-            device.set_peak_hold_time(self.peak_hold.value())
+        emissivity = self.emissivity.value()
+        transmission = self.transmission.value()
+        average_time = self.average_time.value()
+        smart_averaging = self.smart_averaging.isChecked()
+        peak_hold = self.peak_hold.value()
+
+        def apply():
+            device.set_emissivity(emissivity)
+            device.set_transmission(transmission)
+            device.set_average_time(average_time)
+            device.set_smart_averaging(smart_averaging)
+            device.set_peak_hold_time(peak_hold)
+
+        def completed(_result):
             display_applied = self.apply_video_display_settings(log_change=False)
             self.snapshot = deepcopy(self.profile_data())
             self.log(
                 "Pyrometer and video display settings applied"
                 if display_applied else "Pyrometer settings applied"
             )
-        except Exception as error:
-            self.show_error(error)
+
+        run_busy_task(
+            self, apply, completed, self.show_error,
+            key="device_action",
+        )
 
     def profile_data(self):
         return {

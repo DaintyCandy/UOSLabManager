@@ -1,10 +1,10 @@
 import os
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pyqtgraph as pg
-from core import storage_dir
+from core import MeasurementPipeline, storage_dir
 from core.data_logger import DataLogger
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -37,7 +37,6 @@ class MeasurementPanels:
             100,
             int(self.settings.value("data/buffer_rows", self.DEFAULT_BUFFER_ROWS)),
         )
-        self.t0 = time.time()
         self.times = deque(maxlen=self.buffer_rows)
         self.series = {}
         self.curves = {}
@@ -54,11 +53,16 @@ class MeasurementPanels:
                 self.columns.append(column.label)
                 self.column_devices[column.label] = device_id
                 self.series[column.label] = deque(maxlen=self.buffer_rows)
+        self.measurement_pipeline = MeasurementPipeline(plugins)
+        self.provenance_columns = self.measurement_pipeline.provenance_columns
         self.data_logger = DataLogger(
-            self.columns + ["sequence_marker"], max_rows=self.buffer_rows
+            self.columns + self.provenance_columns + ["sequence_marker"],
+            max_rows=self.buffer_rows,
         )
         self.rows = self.data_logger.rows
         self.pending_sequence_markers = []
+        self._compat_sample_id = 0
+        self._last_zup_alarm = "AL00000"
         self.recording = False
         self.timer = QTimer()
         self.timer.setInterval(self.update_interval_ms)
@@ -277,22 +281,58 @@ class MeasurementPanels:
     def sync_columns(self):
         self.apply_selection()
 
-    def update(self):
-        data = self.manager.read_all()
-        alarm = data.get("ZUP", {}).get("alarm", "AL00000")
-        if alarm and alarm != "AL00000":
-            self.log(f"ZUP ALARM DETECTED: {alarm}")
-            
-        row = {
-            "datetime": datetime.now().isoformat(timespec="seconds"),
-            "elapsed_s": time.time() - self.t0,
-            "sequence_marker": " | ".join(self.pending_sequence_markers),
+    def set_plugins(self, plugins):
+        """Refresh snapshot provenance after a safe plug-in reload."""
+        self.plugins = dict(plugins)
+        self.measurement_pipeline.plugins = dict(plugins)
+        self.provenance_columns = self.measurement_pipeline.provenance_columns
+        self.data_logger.columns = (
+            self.columns + self.provenance_columns + ["sequence_marker"]
+        )
+
+    def _measurement_snapshot(self):
+        if hasattr(self.manager, "read_snapshot"):
+            return self.manager.read_snapshot()
+        # Compatibility for lightweight managers used by tests and plug-ins.
+        self._compat_sample_id += 1
+        captured_monotonic = time.monotonic()
+        sampled_at = datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        devices = {
+            device_id: {
+                "values": values,
+                "sample_id": self._compat_sample_id,
+                "sampled_at_utc": sampled_at,
+                "age_ms": 0.0,
+                "fresh": True,
+                "response_ms": None,
+            }
+            for device_id, values in self.manager.read_all().items()
         }
+        return {
+            "captured_at_utc": sampled_at,
+            "captured_monotonic": captured_monotonic,
+            "devices": devices,
+        }
+
+    def update(self):
+        snapshot = self._measurement_snapshot()
+        data = {
+            device_id: state.get("values", {})
+            for device_id, state in snapshot["devices"].items()
+        }
+        alarm = data.get("ZUP", {}).get("alarm", "AL00000")
+        if alarm and alarm != "AL00000" and alarm != self._last_zup_alarm:
+            self.log(f"ZUP ALARM DETECTED: {alarm}")
+        self._last_zup_alarm = alarm or "AL00000"
+
+        row = self.measurement_pipeline.ingest(
+            snapshot, tuple(self.pending_sequence_markers)
+        )
+        if row is None:
+            return
         self.pending_sequence_markers.clear()
-        for device_id, plugin in self.plugins.items():
-            values = data.get(device_id, {})
-            for column in plugin.columns:
-                row[column.label] = values.get(column.key, "")
 
         # ========================================================
         # [핵심 1] 카메라 패널에서 방금 찍힌 1D 픽셀 배열을 가져옵니다.
@@ -336,7 +376,10 @@ class MeasurementPanels:
         path, _ = QFileDialog.getSaveFileName(self.table, "Save Data", default_path, "CSV Files (*.csv)")
         if path:
             self.data_logger.save_csv(
-                path, self.selected_columns() + ["sequence_marker"]
+                path,
+                self.selected_columns()
+                + self.provenance_columns
+                + ["sequence_marker"],
             )
             self.log(f"Saved selected CSV: {path}")
 
@@ -374,5 +417,5 @@ class MeasurementPanels:
             self.series[label].clear()
             for curves in self.plot_curves:
                 curves[label].setData([], [])
-        self.t0 = time.time()
+        self.measurement_pipeline.reset()
         self.log("Table cleared")

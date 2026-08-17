@@ -12,6 +12,7 @@ from datetime import datetime
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
+from core.plugin_manager import validate_plugin_id
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QTextOption
 from PyQt6.QtWidgets import (
@@ -52,7 +53,20 @@ class CodexWorker(QThread):
             "workspace. Only edit files inside the current workspace. Do not use "
             "network access, do not access hardware, and do not modify files outside "
             "this workspace. Preserve plugin.json, ExperimentPlugin API compatibility, "
-            "and safe shutdown behavior. Inspect existing files only as needed. Make "
+            "and safe shutdown behavior. Keep all QWidget creation and mutation on the "
+            "Qt GUI thread. Run blocking connection, device, file, and analysis work "
+            "through DeviceManager workers, QThread, or "
+            "gui.widget_busy_spinner.run_busy_task. Let that helper show its shared "
+            "text-free spinner only when a user-triggered task exceeds the loading "
+            "delay; never instantiate or show the spinner manually. Never call "
+            "time.sleep or wait for hardware on the GUI thread, prevent duplicate "
+            "starts, and release timers/threads in shutdown(). Consume measurement "
+            "data through DeviceManager snapshots and retain sample timestamps, IDs, "
+            "and freshness metadata instead of repeatedly logging cached values. "
+            "When plugin.json declares a composite device, you may create additional "
+            "Python modules and nested packages inside the workspace for independent "
+            "resources, services, platform resolvers, mocks, and tests. "
+            "Inspect existing files only as needed. Make "
             "the requested edits directly, then summarize the changes briefly."
         )
         try:
@@ -415,9 +429,15 @@ class CodexPanel(QWidget):
         self._stop_worker()
         self._clear_staging()
         self.plugin_dir = plugin_dir
-        self.plugin_kind = (
-            "experiment" if (plugin_dir / "plugin.json").is_file() else "device"
-        )
+        try:
+            manifest = json.loads(
+                (plugin_dir / "plugin.json").read_text(encoding="utf-8")
+            )
+            self.plugin_kind = manifest.get("type")
+        except (OSError, ValueError, json.JSONDecodeError):
+            self.plugin_kind = None
+        if self.plugin_kind not in {"experiment", "device"}:
+            self.plugin_kind = "device"
         self.log_view.clear()
         self._set_staging_state(False)
         self.send_button.setEnabled(plugin_dir.is_dir())
@@ -587,9 +607,17 @@ class CodexPanel(QWidget):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(contents, encoding="utf-8")
         if self.plugin_kind == "device":
+            try:
+                manifest = json.loads(
+                    (self.plugin_dir / "plugin.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                manifest = {}
+            profile = manifest.get("profile", "standard")
             api_notes = (
                 "# UOSLabManager device plugin\n\n"
-                "Keep `plugin.py` exporting a `DevicePlugin` instance. Device packages "
+                f"This is a `{profile}` device package. Keep `plugin.json` and "
+                "`plugin.py` exporting a `DevicePlugin` instance. Device packages "
                 "normally contain `driver.py`, `panel.py`, and `plugin.py`. The driver "
                 "must implement `read_all()` returning a dictionary and `close()`. "
                 "Optional sequence commands belong in the DevicePlugin's "
@@ -597,8 +625,22 @@ class CodexPanel(QWidget):
                 "`SequenceCommand` metadata and an executor accepting "
                 "`(device, value, context)`; do not add device dispatch branches to "
                 "the sequence GUI. "
-                "Panels must safely stop timers and threads in `shutdown()`. Do not "
-                "send commands to real hardware while editing or validating.\n"
+                "Connect and run panel device commands with `run_busy_task` so no "
+                "DeviceProxy call blocks the GUI. Let its delayed shared spinner "
+                "remain text-free; do not show a custom spinner. QWidget updates "
+                "belong on the GUI thread, while hardware and blocking work belong on "
+                "the device worker. Consume timestamped DeviceManager snapshots for "
+                "measurement data and do not duplicate cached samples. Panels must "
+                "safely stop timers and threads in `shutdown()`. Do not "
+                "send commands to real hardware while editing or validating. "
+                + (
+                    "You may create any additional `.py` modules or nested Python "
+                    "packages needed for independent resources, platform resolvers, "
+                    "services, or tests. Keep every new file inside this plug-in "
+                    "workspace and give each blocking resource one owning thread.\n"
+                    if profile == "composite"
+                    else "Keep the standard package small and prefer the shared panel.\n"
+                )
             )
         else:
             api_notes = (
@@ -607,7 +649,12 @@ class CodexPanel(QWidget):
                 "`ExperimentPlugin` object. Optional Sequence commands are declared "
                 "with `SequenceCommand` in plugin.py and implemented by "
                 "`execute_sequence_command`, `is_sequence_command_complete`, and "
-                "`cancel_sequence_command` in panel.py. Always implement `shutdown` "
+                "`cancel_sequence_command` in panel.py. Run blocking work with "
+                "`run_busy_task` or QThread and use the delayed shared text-free "
+                "spinner instead of showing a custom loader. "
+                "Keep QWidget access on the GUI thread, avoid duplicate task starts, "
+                "and consume timestamped snapshots without logging cached samples "
+                "again. Always implement `shutdown` "
                 "for timers, threads, and hardware cleanup.\n"
             )
         (self.staging_dir / "PLUGIN_API.md").write_text(
@@ -656,21 +703,32 @@ class CodexPanel(QWidget):
                 ast.parse(source_path.read_text(encoding="utf-8"), str(source_path))
             except (OSError, UnicodeError, SyntaxError) as error:
                 errors.append(f"{source_path.relative_to(self.staging_dir)}: {error}")
-        if self.plugin_kind == "experiment":
+        if self.plugin_kind in {"experiment", "device"}:
             manifest_path = self.staging_dir / "plugin.json"
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 plugin_id = manifest.get("id")
-                if manifest.get("type") != "experiment":
-                    raise ValueError("type must be 'experiment'")
-                if not isinstance(plugin_id, str) or not re.fullmatch(
-                    r"[A-Za-z][A-Za-z0-9_]*", plugin_id
+                if manifest.get("type") != self.plugin_kind:
+                    raise ValueError(f"type must be {self.plugin_kind!r}")
+                if (
+                    self.plugin_kind == "device"
+                    and manifest.get("profile", "standard")
+                    not in {"standard", "composite"}
                 ):
-                    raise ValueError("invalid plugin id")
+                    raise ValueError(
+                        "profile must be 'standard' or 'composite'"
+                    )
+                validate_plugin_id(plugin_id)
                 source_name, separator, export_name = manifest.get(
                     "entrypoint", "plugin.py:plugin"
                 ).partition(":")
-                if not separator or not export_name or not (self.staging_dir / source_name).is_file():
+                source_path = (self.staging_dir / source_name).resolve()
+                if (
+                    not separator
+                    or not export_name
+                    or source_path.parent != self.staging_dir.resolve()
+                    or not source_path.is_file()
+                ):
                     raise ValueError("invalid or missing entrypoint")
             except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
                 errors.append(f"plugin.json: {error}")
@@ -680,9 +738,6 @@ class CodexPanel(QWidget):
             "VALIDATION PASSED\n\n"
             f"- {len(python_files)} Python file(s): syntax OK\n"
             "- Plugin manifest: OK"
-            if self.plugin_kind == "experiment"
-            else "VALIDATION PASSED\n\n"
-            f"- {len(python_files)} Python file(s): syntax OK"
         )
 
     def _changed_line_map(self, staged):

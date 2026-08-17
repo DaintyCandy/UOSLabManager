@@ -30,6 +30,22 @@ class TestGPD3303SPanel(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        def run_inline(_parent, action, success=None, failure=None, **_kwargs):
+            try:
+                result = action()
+            except Exception as error:
+                if failure is not None:
+                    failure(error)
+            else:
+                if success is not None:
+                    success(result)
+
+        self.busy_task_patch = patch(
+            "plugins.devices.gpd3303s.panel.run_busy_task",
+            side_effect=run_inline,
+        )
+        self.busy_task_patch.start()
+        self.addCleanup(self.busy_task_patch.stop)
         self.device = MagicMock()
         manager = FakeManager(self.device)
         plugin = SimpleNamespace(device_id="GPD3303S")
@@ -47,7 +63,10 @@ class TestGPD3303SPanel(unittest.TestCase):
         self.assertTrue(self.panel.output_off_on_connect.isChecked())
 
     def test_channel_settings_apply_current_before_voltage(self):
-        self.panel._apply_channel_settings("CH1")
+        voltage, current = self.panel._channel_settings("CH1")
+        self.panel._write_channel_settings(
+            self.device, "CH1", voltage, current
+        )
         self.assertEqual(
             self.device.method_calls,
             [call.set_channel_current("CH1", 0.05), call.set_channel_voltage("CH1", 1.0)],

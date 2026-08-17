@@ -3,6 +3,8 @@ from PyQt6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
+from .widget_busy_spinner import run_busy_task
+
 
 class DeviceSettingsPanel(QWidget):
     """Basic connection panel used when a device has no advanced UI."""
@@ -39,23 +41,51 @@ class DeviceSettingsPanel(QWidget):
     def connect_device(self):
         connection = self.connection_input.text().strip()
         if self.manager.get_device(self.plugin.device_id) is None:
-            try:
+            def connect():
                 self.manager.add_device(
                     self.plugin.device_id,
                     lambda: self.plugin.connect(connection),
                 )
+
+            def connected(_result):
                 self.main_window.log(self.plugin.format_connected(connection))
                 self.log_box.append(self.plugin.format_connected(connection))
-            except Exception as error:
+                self._notify()
+
+            def failed(error):
                 QMessageBox.critical(self, f"{self.plugin.display_name} Error", str(error))
                 self.log_box.append(str(error))
-        self._notify()
+                self._notify()
+
+            run_busy_task(
+                self, connect, connected, failed,
+                key="connection",
+            )
 
     def disconnect_device(self):
-        self.manager.remove_device(self.plugin.device_id)
-        self.main_window.log(self.plugin.format_disconnected())
-        self.log_box.append(self.plugin.format_disconnected())
-        self._notify()
+        if self.manager.get_device(self.plugin.device_id) is None:
+            return
+
+        def disconnected(_result):
+            message = self.plugin.format_disconnected()
+            self.main_window.log(message)
+            self.log_box.append(message)
+            self._notify()
+
+        def failed(error):
+            QMessageBox.critical(
+                self, f"{self.plugin.display_name} Error", str(error)
+            )
+            self.log_box.append(str(error))
+            self._notify()
+
+        run_busy_task(
+            self,
+            lambda: self.manager.remove_device(self.plugin.device_id),
+            disconnected,
+            failed,
+            key="connection",
+        )
 
     def _notify(self):
         self.sync_connection_status()

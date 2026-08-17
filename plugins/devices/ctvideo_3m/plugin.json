@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "api_version": "1",
+  "type": "device",
+  "profile": "composite",
+  "id": "CTVIDEO3M",
+  "name": "CTvideo 3M",
+  "version": "1.0.0",
+  "entrypoint": "plugin.py:plugin",
+  "enabled": true,
+  "platforms": ["windows", "macos"],
+  "resources": [
+    {
+      "id": "pyrometer",
+      "roles": ["measurement", "control"],
+      "thread": "device_worker"
+    },
+    {
+      "id": "camera",
+      "roles": ["video", "camera_control"],
+      "thread": "dedicated_qthread"
+    }
+  ],
+  "permissions": [
+    "serial",
+    "camera",
+    "native_library",
+    "platform_device_enumeration"
+  ],
+  "hazardous_operations": [
+    {
+      "id": "calibration_write",
+      "confirmation": "required",
+      "read_before_write": true,
+      "verify_after_write": true
+    },
+    {
+      "id": "camera_eeprom_write",
+      "confirmation": "required",
+      "read_before_write": true,
+      "verify_after_write": true
+    }
+  ]
+}

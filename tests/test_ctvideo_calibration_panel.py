@@ -33,6 +33,22 @@ class CTVideoCalibrationPanelTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
+        def run_inline(_parent, action, success=None, failure=None, **_kwargs):
+            try:
+                result = action()
+            except Exception as error:
+                if failure is not None:
+                    failure(error)
+            else:
+                if success is not None:
+                    success(result)
+
+        self.busy_task_patch = patch(
+            "plugins.devices.ctvideo_3m.panel.run_busy_task",
+            side_effect=run_inline,
+        )
+        self.busy_task_patch.start()
+        self.addCleanup(self.busy_task_patch.stop)
         self.manager = FakeManager()
         self.panel = CTVideo3MPanel(self.manager, MagicMock())
         self.snapshot = CalibrationSnapshot(

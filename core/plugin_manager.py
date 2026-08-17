@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import json
+import keyword
 import math
 import os
 import pkgutil
@@ -14,6 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any, Callable
+
+
+PLUGIN_ID_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL", "CLOCK$",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -93,6 +102,8 @@ class ExperimentPlugin:
 class DevicePlugin(ABC):
     device_id: str
     display_name: str
+    profile: str = "standard"
+    version: str = "0.1.0"
     order: int = 100
     connection_label: str = "Address"
     default_connection: str = ""
@@ -118,27 +129,41 @@ class DevicePlugin(ABC):
         )
 
 
-def load_device_plugins(*, reload_modules: bool = False) -> dict[str, DevicePlugin]:
-    """Discover ``plugins.devices.<name>.plugin`` packages."""
-    package = importlib.import_module("plugins.devices")
+def load_device_plugins(
+    device_plugin_root: str | os.PathLike[str] | None = None,
+    *,
+    reload_modules: bool = False,
+    strict: bool = True,
+) -> dict[str, DevicePlugin]:
+    """Discover editable, manifest-based device plug-ins."""
+    root = (
+        Path(device_plugin_root)
+        if device_plugin_root is not None
+        else get_plugin_root() / "devices"
+    )
     plugins: dict[str, DevicePlugin] = {}
-    for info in pkgutil.iter_modules(package.__path__):
-        if not info.ispkg or info.name.startswith("_"):
+    normalized_ids: set[str] = set()
+    if not root.is_dir():
+        return plugins
+    for manifest_path in sorted(root.glob("*/plugin.json")):
+        try:
+            candidate = _load_device_plugin(
+                manifest_path, reload_modules=reload_modules
+            )
+        except Exception:
+            if strict:
+                raise
             continue
-        module_name = f"plugins.devices.{info.name}.plugin"
-        if reload_modules:
-            package_prefix = f"plugins.devices.{info.name}"
-            for loaded_name in tuple(sys.modules):
-                if loaded_name == package_prefix or loaded_name.startswith(
-                    package_prefix + "."
-                ):
-                    sys.modules.pop(loaded_name, None)
-        module = importlib.import_module(module_name)
-        candidate = getattr(module, "plugin", None)
-        if not isinstance(candidate, DevicePlugin):
+        if candidate is None:
             continue
-        if candidate.device_id in plugins:
-            raise ValueError(f"Duplicate device plug-in id: {candidate.device_id}")
+        normalized_id = candidate.device_id.casefold()
+        if normalized_id in normalized_ids:
+            if strict:
+                raise ValueError(
+                    f"Duplicate device plug-in id: {candidate.device_id}"
+                )
+            continue
+        normalized_ids.add(normalized_id)
         plugins[candidate.device_id] = candidate
     return dict(sorted(plugins.items(), key=lambda item: (item[1].order, item[0])))
 
@@ -179,16 +204,60 @@ def get_user_plugin_root() -> Path:
     return get_plugin_root()
 
 
-def _plugin_manifest(plugin_dir: Path) -> dict[str, Any]:
+def validate_plugin_id(plugin_id: str) -> str:
+    """Validate one portable identifier shared by every plug-in type."""
+    if not isinstance(plugin_id, str):
+        raise ValueError("Plugin ID must be text")
+    if not PLUGIN_ID_PATTERN.fullmatch(plugin_id):
+        raise ValueError(
+            "Plugin ID must be 1-64 ASCII characters, start with a letter, "
+            "and contain only letters, numbers, or underscores"
+        )
+    if keyword.iskeyword(plugin_id):
+        raise ValueError("Plugin ID cannot be a Python keyword")
+    if plugin_id.upper() in WINDOWS_RESERVED_NAMES:
+        raise ValueError("Plugin ID is a reserved Windows file name")
+    return plugin_id
+
+
+def resolve_plugin_python_path(plugin_dir: Path, relative_path: str) -> Path:
+    """Resolve one importable .py path without allowing package traversal."""
+    plugin_dir = Path(plugin_dir).resolve()
+    normalized = str(relative_path).strip().replace("\\", "/")
+    relative = PurePosixPath(normalized)
+    if (
+        not normalized
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative.suffix != ".py"
+    ):
+        raise ValueError("Use a relative .py path inside the plugin")
+    for index, part in enumerate(relative.parts):
+        name = part[:-3] if index == len(relative.parts) - 1 else part
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError("Python file and package names must be valid identifiers")
+    target = plugin_dir.joinpath(*relative.parts).resolve()
+    if plugin_dir not in target.parents:
+        raise ValueError("The Python file path is outside the plugin")
+    return target
+
+
+def _plugin_manifest(
+    plugin_dir: Path, expected_type: str | None = None
+) -> dict[str, Any]:
     manifest_path = plugin_dir / "plugin.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     plugin_id = manifest.get("id")
-    if manifest.get("type") != "experiment":
-        raise ValueError("Only experiment plugins can be imported or exported")
-    if not isinstance(plugin_id, str) or not re.fullmatch(
-        r"[A-Za-z][A-Za-z0-9_]*", plugin_id
-    ):
-        raise ValueError("Plugin manifest contains an invalid id")
+    plugin_type = manifest.get("type")
+    if plugin_type not in {"experiment", "device"}:
+        raise ValueError("Plugin type must be 'experiment' or 'device'")
+    if expected_type is not None and plugin_type != expected_type:
+        raise ValueError(f"Expected a {expected_type} plugin")
+    if plugin_type == "device" and manifest.get("profile", "standard") not in {
+        "standard", "composite",
+    }:
+        raise ValueError("Device profile must be 'standard' or 'composite'")
+    validate_plugin_id(plugin_id)
     entrypoint = manifest.get("entrypoint", "plugin.py:plugin")
     module_file, separator, attribute = entrypoint.partition(":")
     if not separator or not module_file or not attribute:
@@ -199,10 +268,26 @@ def _plugin_manifest(plugin_dir: Path) -> dict[str, Any]:
     return manifest
 
 
+def export_plugin(plugin_dir: Path, archive_path: Path) -> Path:
+    """Export an experiment or device package as a portable archive."""
+    return _export_plugin(plugin_dir, archive_path)
+
+
 def export_experiment_plugin(plugin_dir: Path, archive_path: Path) -> Path:
     """Export an editable experiment plugin as a portable .uosplugin archive."""
+    return _export_plugin(plugin_dir, archive_path, expected_type="experiment")
+
+
+def export_device_plugin(plugin_dir: Path, archive_path: Path) -> Path:
+    """Export an editable device plugin as a portable .uosplugin archive."""
+    return _export_plugin(plugin_dir, archive_path, expected_type="device")
+
+
+def _export_plugin(
+    plugin_dir: Path, archive_path: Path, expected_type: str | None = None
+) -> Path:
     plugin_dir = Path(plugin_dir).resolve()
-    _plugin_manifest(plugin_dir)
+    _plugin_manifest(plugin_dir, expected_type)
     archive_path = Path(archive_path)
     if archive_path.suffix.lower() != ".uosplugin":
         archive_path = archive_path.with_suffix(".uosplugin")
@@ -221,10 +306,41 @@ def export_experiment_plugin(plugin_dir: Path, archive_path: Path) -> Path:
     return archive_path
 
 
+def import_plugin(
+    archive_path: Path, plugin_root: Path, *, replace: bool = False
+) -> Path:
+    """Install an archive into the matching devices/experiments directory."""
+    return _import_plugin_archive(
+        archive_path, plugin_root, replace=replace, categorize=True
+    )
+
+
 def import_experiment_plugin(
     archive_path: Path, plugin_root: Path, *, replace: bool = False
 ) -> Path:
-    """Validate and install a .uosplugin archive into ``plugin_root``."""
+    """Validate and install an experiment archive into ``plugin_root``."""
+    return _import_plugin_archive(
+        archive_path, plugin_root, replace=replace, expected_type="experiment"
+    )
+
+
+def import_device_plugin(
+    archive_path: Path, plugin_root: Path, *, replace: bool = False
+) -> Path:
+    """Validate and install a device archive into ``plugin_root``."""
+    return _import_plugin_archive(
+        archive_path, plugin_root, replace=replace, expected_type="device"
+    )
+
+
+def _import_plugin_archive(
+    archive_path: Path,
+    plugin_root: Path,
+    *,
+    replace: bool = False,
+    expected_type: str | None = None,
+    categorize: bool = False,
+) -> Path:
     archive_path = Path(archive_path)
     plugin_root = Path(plugin_root).resolve()
     plugin_root.mkdir(parents=True, exist_ok=True)
@@ -261,19 +377,47 @@ def import_experiment_plugin(
         )
         if source_dir is None:
             raise ValueError("Plugin archive does not contain plugin.json")
-        manifest = _plugin_manifest(source_dir)
-        destination = plugin_root / manifest["id"]
-        if destination.exists() and not replace:
-            raise FileExistsError(str(destination))
+        manifest = _plugin_manifest(source_dir, expected_type)
+        destination_root = plugin_root
+        if categorize:
+            category = "devices" if manifest["type"] == "device" else "experiments"
+            destination_root = plugin_root / category
+            destination_root.mkdir(parents=True, exist_ok=True)
+        destination = destination_root / manifest["id"]
+        existing_destination = None
+        for existing_manifest in destination_root.glob("*/plugin.json"):
+            existing_parent = existing_manifest.parent.resolve()
+            temporary_root = temporary.resolve()
+            if (
+                existing_parent == temporary_root
+                or temporary_root in existing_parent.parents
+            ):
+                continue
+            try:
+                existing_id = json.loads(
+                    existing_manifest.read_text(encoding="utf-8")
+                ).get("id")
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(existing_id, str)
+                and existing_id.casefold() == manifest["id"].casefold()
+            ):
+                existing_destination = existing_parent
+                break
+        if existing_destination is None and destination.exists():
+            existing_destination = destination
+        if existing_destination is not None and not replace:
+            raise FileExistsError(str(existing_destination))
 
-        staged = plugin_root / f".__import_{manifest['id']}__"
-        backup = plugin_root / f".__backup_{manifest['id']}__"
+        staged = destination_root / f".__import_{manifest['id']}__"
+        backup = destination_root / f".__backup_{manifest['id']}__"
         if staged.exists() or backup.exists():
             raise OSError("A previous plugin import did not finish cleanly")
         shutil.copytree(source_dir, staged)
         try:
-            if destination.exists():
-                destination.rename(backup)
+            if existing_destination is not None:
+                existing_destination.rename(backup)
             staged.rename(destination)
         except Exception:
             if backup.exists() and not destination.exists():
@@ -282,6 +426,48 @@ def import_experiment_plugin(
         if backup.exists():
             shutil.rmtree(backup)
         return destination
+
+
+def _load_device_plugin(
+    manifest_path: Path, *, reload_modules: bool = False
+) -> DevicePlugin | None:
+    manifest = _plugin_manifest(manifest_path.parent, expected_type="device")
+    if not manifest.get("enabled", True):
+        return None
+    plugin_id = manifest["id"]
+    entrypoint = manifest.get("entrypoint", "plugin.py:plugin")
+    module_file, _, attribute = entrypoint.partition(":")
+    source_path = manifest_path.parent / module_file
+    module_name = f"_uoslab_device_{plugin_id}"
+    if reload_modules or module_name in sys.modules:
+        for loaded_name in tuple(sys.modules):
+            if loaded_name == module_name or loaded_name.startswith(module_name + "."):
+                sys.modules.pop(loaded_name, None)
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        source_path,
+        submodule_search_locations=[str(manifest_path.parent)],
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load device plug-in: {source_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    candidate = getattr(module, attribute, None)
+    if not isinstance(candidate, DevicePlugin):
+        raise TypeError(f"{entrypoint} does not export a DevicePlugin")
+    if candidate.device_id != plugin_id:
+        raise ValueError(
+            f"Manifest id {plugin_id!r} does not match "
+            f"DevicePlugin id {candidate.device_id!r}"
+        )
+    candidate.profile = manifest.get("profile", "standard")
+    candidate.version = str(manifest.get("version", "0.1.0"))
+    return candidate
 
 
 def _seed_plugins(source: Path, destination: Path) -> None:
@@ -329,10 +515,12 @@ def _load_user_experiment_plugin(manifest_path: Path) -> ExperimentPlugin | None
     if manifest.get("type") != "experiment" or not manifest.get("enabled", True):
         return None
     manifest_id = manifest.get("id")
-    if not isinstance(manifest_id, str) or not re.fullmatch(
-        r"[A-Za-z][A-Za-z0-9_]*", manifest_id
-    ):
-        raise ValueError(f"Invalid experiment plug-in id in {manifest_path}")
+    try:
+        validate_plugin_id(manifest_id)
+    except ValueError as error:
+        raise ValueError(
+            f"Invalid experiment plug-in id in {manifest_path}: {error}"
+        ) from error
     entrypoint = manifest.get("entrypoint", "plugin.py:plugin")
     module_file, separator, attribute = entrypoint.partition(":")
     if not separator or not module_file or not attribute:
@@ -374,6 +562,7 @@ def _load_user_experiment_plugins(
     root: Path, strict: bool = True,
 ) -> dict[str, ExperimentPlugin]:
     plugins: dict[str, ExperimentPlugin] = {}
+    normalized_ids: set[str] = set()
     if not root.is_dir():
         return plugins
 
@@ -385,6 +574,14 @@ def _load_user_experiment_plugins(
                 raise
             continue
         if candidate is not None:
+            normalized_id = candidate.experiment_id.casefold()
+            if normalized_id in normalized_ids:
+                if strict:
+                    raise ValueError(
+                        f"Duplicate experiment plug-in id: {candidate.experiment_id}"
+                    )
+                continue
+            normalized_ids.add(normalized_id)
             plugins[candidate.experiment_id] = candidate
     return plugins
 
@@ -397,6 +594,7 @@ def load_experiment_plugins(
     """Discover built-in and editable user experiment plug-ins."""
     package = importlib.import_module("plugins.experiments")
     plugins: dict[str, ExperimentPlugin] = {}
+    normalized_ids: set[str] = set()
     for info in pkgutil.iter_modules(package.__path__):
         if info.ispkg or info.name.startswith("_"):
             continue
@@ -404,8 +602,10 @@ def load_experiment_plugins(
         candidate = getattr(module, "plugin", None)
         if not isinstance(candidate, ExperimentPlugin):
             continue
-        if candidate.experiment_id in plugins:
+        normalized_id = candidate.experiment_id.casefold()
+        if normalized_id in normalized_ids:
             raise ValueError(f"Duplicate experiment plug-in id: {candidate.experiment_id}")
+        normalized_ids.add(normalized_id)
         plugins[candidate.experiment_id] = candidate
     user_root = (
         Path(user_plugin_root)
@@ -415,7 +615,9 @@ def load_experiment_plugins(
     for experiment_id, candidate in _load_user_experiment_plugins(
         user_root, strict=strict
     ).items():
-        if experiment_id in plugins:
+        normalized_id = experiment_id.casefold()
+        if normalized_id in normalized_ids:
             raise ValueError(f"Duplicate experiment plug-in id: {experiment_id}")
+        normalized_ids.add(normalized_id)
         plugins[experiment_id] = candidate
     return dict(sorted(plugins.items(), key=lambda item: (item[1].order, item[0])))

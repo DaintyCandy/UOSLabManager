@@ -25,6 +25,38 @@ command therefore does not require editing `gui/panel_sequence.py`. Executors
 receive `(device, value, context)`; the context provides cancellation-aware
 waiting, logging, and per-run state.
 
+Each connected device owns a dedicated `DeviceWorker-<device_id>` thread. Its
+driver is created, polled, commanded, and closed on that thread. Qt widgets stay
+on the GUI thread as required by Qt; connection waits and plug-in reloads use the
+shared busy-task runner so the loading indicator and interface remain responsive.
+The loading surface is intentionally text-free and consistent across plug-ins.
+
+## Device plug-in packages
+
+Device plug-ins are discovered from `plugins/devices/*/plugin.json`. A manifest
+declares a `standard` or `composite` profile, package version, entrypoint, owned
+resources, permissions, and optional hazardous operations. Standard devices use
+the shared connection panel; composite devices such as CTvideo may own a custom
+panel and multiple independently threaded resources.
+
+Plugin Studio can create, import, export, validate, and reload both profiles.
+Right-click a composite device in the plug-in tree to add a safely confined
+Python module directly or ask Codex to create it in the reviewable staging area.
+New module paths must remain inside the selected package and use valid Python
+identifiers. Standard-device scaffolds also include an editable `panel.py` built
+on the shared connection panel. Plug-in IDs are limited to 1-64 ASCII letters,
+numbers, or underscores, must start with a letter, and cannot be Python keywords
+or reserved Windows file names. ID editing is available from the plug-in tree's
+context menu.
+
+Measurement workers attach a monotonically increasing sample ID, UTC acquisition
+timestamp, response time, and freshness state to every latest value. The
+UI-independent `MeasurementPipeline` records a row only when a device sample,
+connection state, or freshness state changes (or a sequence marker arrives),
+preventing cached values from being duplicated while preserving stale-data
+transitions. CSV exports retain per-device sample IDs, acquisition times, ages,
+response times, and freshness flags for later provenance checks.
+
 ## Building the Windows executable
 
 ```powershell

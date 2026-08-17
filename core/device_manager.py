@@ -2,6 +2,7 @@ import copy
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 
 
 class DeviceProxy:
@@ -150,7 +151,12 @@ class DeviceManager:
             )
             self.workers[name] = worker
             self.devices[name] = DeviceProxy(worker)
-            self.telemetry[name] = {"response_ms": None, "updated_at": None}
+            self.telemetry[name] = {
+                "response_ms": None,
+                "updated_at": None,
+                "sample_id": 0,
+                "sampled_at_utc": None,
+            }
         worker.start()
         if not worker.ready.wait(10.0):
             self.remove_device(name)
@@ -166,10 +172,13 @@ class DeviceManager:
         with self.lock:
             if self.workers.get(name) is not worker:
                 return
+            previous = self.telemetry.get(name, {})
             self.latest[name] = copy.deepcopy(values)
             self.telemetry[name] = {
                 "response_ms": response_ms,
                 "updated_at": time.monotonic(),
+                "sample_id": int(previous.get("sample_id", 0)) + 1,
+                "sampled_at_utc": self._utc_now(),
             }
             self.disconnect_errors.pop(name, None)
 
@@ -206,6 +215,7 @@ class DeviceManager:
     def get_metrics(self, name: str):
         with self.lock:
             connected = name in self.devices
+            worker = self.workers.get(name)
             telemetry = self.telemetry.get(name, {})
             updated_at = telemetry.get("updated_at")
             return {
@@ -215,6 +225,43 @@ class DeviceManager:
                 "updated_at": updated_at,
                 "age_ms": None if updated_at is None else (time.monotonic() - updated_at) * 1000.0,
                 "error": self.disconnect_errors.get(name, ""),
+                "worker_name": None if worker is None else worker.name,
+                "worker_alive": bool(worker and worker.is_alive()),
+                "worker_ident": None if worker is None else worker.ident,
+                "sample_id": telemetry.get("sample_id", 0),
+                "sampled_at_utc": telemetry.get("sampled_at_utc"),
+            }
+
+    @staticmethod
+    def _utc_now():
+        return datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+
+    def read_snapshot(self):
+        """Return one atomic, timestamped view of all connected devices."""
+        with self.lock:
+            captured_monotonic = time.monotonic()
+            devices = {}
+            for name in self.devices:
+                telemetry = self.telemetry.get(name, {})
+                updated_at = telemetry.get("updated_at")
+                age_ms = (
+                    None if updated_at is None
+                    else (captured_monotonic - updated_at) * 1000.0
+                )
+                devices[name] = {
+                    "values": copy.deepcopy(self.latest.get(name, {})),
+                    "sample_id": int(telemetry.get("sample_id", 0)),
+                    "sampled_at_utc": telemetry.get("sampled_at_utc"),
+                    "age_ms": age_ms,
+                    "fresh": bool(age_ms is not None and age_ms < 2500.0),
+                    "response_ms": telemetry.get("response_ms"),
+                }
+            return {
+                "captured_at_utc": self._utc_now(),
+                "captured_monotonic": captured_monotonic,
+                "devices": devices,
             }
 
     def read_all(self):

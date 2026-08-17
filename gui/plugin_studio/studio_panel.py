@@ -8,11 +8,12 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
-    QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QMenu, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core import (
-    export_experiment_plugin, get_plugin_root, import_experiment_plugin,
+    export_plugin, get_plugin_root, import_plugin, resolve_plugin_python_path,
+    validate_plugin_id,
 )
 from .code_editor import CodeEditor
 from .codex_panel import CodexPanel
@@ -25,9 +26,11 @@ class PluginStudioPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.plugin_root = get_plugin_root() / "experiments"
-        self.device_plugin_root = Path(__file__).resolve().parents[2] / "plugins" / "devices"
+        self.plugin_base_root = get_plugin_root()
+        self.plugin_root = self.plugin_base_root / "experiments"
+        self.device_plugin_root = self.plugin_base_root / "devices"
         self.plugin_root.mkdir(parents=True, exist_ok=True)
+        self.device_plugin_root.mkdir(parents=True, exist_ok=True)
         self.current_path = None
         self.codex_changed_lines = {}
         self._loading = False
@@ -47,7 +50,6 @@ class PluginStudioPanel(QWidget):
             ("New Plugin", self.create_plugin),
             ("Import", self.import_plugin),
             ("Export", self.export_plugin),
-            ("Edit ID", self.edit_plugin_id),
             ("Remove", self.remove_plugin),
             ("Save", self.save_current),
             ("Validate", self.validate_all),
@@ -61,8 +63,12 @@ class PluginStudioPanel(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Plugins")
-        self.tree.setMinimumWidth(230)
+        self.tree.setMinimumWidth(180)
         self.tree.itemSelectionChanged.connect(self.open_selected)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(
+            self._show_tree_context_menu
+        )
         splitter.addWidget(self.tree)
 
         editor_container = QWidget()
@@ -100,12 +106,184 @@ class PluginStudioPanel(QWidget):
         value = items[0].data(0, PLUGIN_ROOT_ROLE)
         return Path(value).resolve() if value else None
 
+    @staticmethod
+    def _read_manifest(plugin_dir):
+        manifest_path = Path(plugin_dir) / "plugin.json"
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    def _plugin_id_in_use(self, root, plugin_id, exclude=None):
+        """Check IDs case-insensitively so packages stay portable to Windows."""
+        root = Path(root).resolve()
+        exclude = Path(exclude).resolve() if exclude is not None else None
+        for manifest_path in root.glob("*/plugin.json"):
+            if exclude is not None and manifest_path.parent.resolve() == exclude:
+                continue
+            try:
+                existing_id = self._read_manifest(manifest_path.parent)["id"]
+            except (OSError, KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if str(existing_id).casefold() == plugin_id.casefold():
+                return True
+        return False
+
+    def _show_tree_context_menu(self, position):
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+        self.tree.setCurrentItem(item)
+        plugin_dir = self._selected_plugin_dir()
+        if plugin_dir is None:
+            return
+        try:
+            manifest = self._read_manifest(plugin_dir)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        is_composite = (
+            manifest.get("type") == "device"
+            and manifest.get("profile", "standard") == "composite"
+        )
+        menu = QMenu(self.tree)
+        edit_id = menu.addAction("Edit Plugin ID...")
+        add_python = None
+        add_with_codex = None
+        if is_composite:
+            menu.addSeparator()
+            add_python = menu.addAction("Add Python File...")
+            add_with_codex = menu.addAction("Add Python File with Codex...")
+        selected = menu.exec(self.tree.viewport().mapToGlobal(position))
+        if selected == edit_id:
+            self.edit_plugin_id()
+        elif add_python is not None and selected == add_python:
+            self.add_composite_python_file(plugin_dir)
+        elif add_with_codex is not None and selected == add_with_codex:
+            self.add_composite_python_file_with_codex(plugin_dir)
+
+    def add_composite_python_file(self, plugin_dir=None):
+        """Add a safe relative Python module to a composite device package."""
+        plugin_dir = plugin_dir or self._selected_plugin_dir()
+        if plugin_dir is None:
+            QMessageBox.warning(
+                self, "Plugin Studio", "Select a composite device plugin first."
+            )
+            return False
+        plugin_dir = Path(plugin_dir).resolve()
+        try:
+            plugin_dir.relative_to(self.device_plugin_root.resolve())
+            manifest = self._read_manifest(plugin_dir)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            QMessageBox.warning(
+                self, "Plugin Studio", "Select a composite device plugin first."
+            )
+            return False
+        if not (
+            manifest.get("type") == "device"
+            and manifest.get("profile", "standard") == "composite"
+        ):
+            QMessageBox.warning(
+                self, "Plugin Studio",
+                "Python modules can be added from the tree only to composite devices.",
+            )
+            return False
+        if self.codex_panel.staging_dir is not None:
+            QMessageBox.information(
+                self, "Plugin Studio",
+                "Apply or reject the current Codex draft before adding a file.",
+            )
+            return False
+        if not self.maybe_discard_changes():
+            return False
+        relative_text, accepted = QInputDialog.getText(
+            self,
+            "Add Python File",
+            "Relative path (for example services/calibration.py):",
+        )
+        if not accepted:
+            return False
+        try:
+            target = resolve_plugin_python_path(plugin_dir, relative_text)
+        except ValueError:
+            QMessageBox.warning(
+                self, "Plugin Studio",
+                "Use a relative .py path with valid Python package names.",
+            )
+            return False
+        if target.exists():
+            QMessageBox.warning(self, "Plugin Studio", "That file already exists.")
+            return False
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            package_dir = target.parent
+            while package_dir != plugin_dir:
+                initializer = package_dir / "__init__.py"
+                if not initializer.exists():
+                    initializer.write_text(
+                        '"""Composite device package."""\n', encoding="utf-8"
+                    )
+                package_dir = package_dir.parent
+            target.write_text(
+                '"""Composite device extension module."""\n', encoding="utf-8"
+            )
+        except OSError as error:
+            QMessageBox.critical(self, "Plugin Studio", str(error))
+            return False
+        self.refresh_tree(target)
+        self.codex_panel.select_plugin(plugin_dir)
+        self._write_output(f"Added Python file: {target.relative_to(plugin_dir)}")
+        return True
+
+    def add_composite_python_file_with_codex(self, plugin_dir=None):
+        """Start a staged Codex request for a new composite-device module."""
+        plugin_dir = plugin_dir or self._selected_plugin_dir()
+        if plugin_dir is None:
+            return False
+        plugin_dir = Path(plugin_dir).resolve()
+        try:
+            plugin_dir.relative_to(self.device_plugin_root.resolve())
+            manifest = self._read_manifest(plugin_dir)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        if not (
+            manifest.get("type") == "device"
+            and manifest.get("profile", "standard") == "composite"
+        ):
+            return False
+        if self.codex_panel.request_active:
+            QMessageBox.information(
+                self, "Plugin Studio", "Wait for the current Codex request to finish."
+            )
+            return False
+        relative_text, accepted = QInputDialog.getText(
+            self,
+            "Add Python File with Codex",
+            "Relative path (for example services/camera_worker.py):",
+        )
+        if not accepted:
+            return False
+        try:
+            target = resolve_plugin_python_path(plugin_dir, relative_text)
+        except ValueError as error:
+            QMessageBox.warning(self, "Plugin Studio", str(error))
+            return False
+        if target.exists():
+            QMessageBox.warning(self, "Plugin Studio", "That file already exists.")
+            return False
+        self.codex_panel.select_plugin(plugin_dir)
+        relative = target.relative_to(plugin_dir).as_posix()
+        self.codex_panel.prompt.setPlainText(
+            f"Create a new Python module at {relative}. Implement a clean scaffold "
+            "appropriate for this composite device, keep blocking resources on "
+            "their owning worker threads, and integrate it only where needed. "
+            "Do not access real hardware while editing or validating."
+        )
+        self.codex_panel.send_prompt()
+        return True
+
     def import_plugin(self):
         if not self.maybe_discard_changes():
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import experiment plugin",
+            "Import plugin",
             "",
             "UOSLab Plugin (*.uosplugin);;ZIP Archive (*.zip)",
         )
@@ -113,8 +291,8 @@ class PluginStudioPanel(QWidget):
             return
         replace = False
         try:
-            destination = import_experiment_plugin(
-                Path(path), self.plugin_root, replace=False
+            destination = import_plugin(
+                Path(path), self.plugin_base_root, replace=False
             )
         except FileExistsError as error:
             existing = Path(str(error)).name
@@ -130,8 +308,8 @@ class PluginStudioPanel(QWidget):
                 return
             replace = True
             try:
-                destination = import_experiment_plugin(
-                    Path(path), self.plugin_root, replace=True
+                destination = import_plugin(
+                    Path(path), self.plugin_base_root, replace=True
                 )
             except Exception as import_error:
                 QMessageBox.critical(
@@ -145,7 +323,13 @@ class PluginStudioPanel(QWidget):
         self.current_path = None
         self.editor.clear()
         self.editor.document().setModified(False)
-        entrypoint = destination / "plugin.py"
+        try:
+            entrypoint_name = self._read_manifest(destination).get(
+                "entrypoint", "plugin.py:plugin"
+            ).partition(":")[0]
+        except (OSError, ValueError, json.JSONDecodeError):
+            entrypoint_name = "plugin.py"
+        entrypoint = destination / entrypoint_name
         self.refresh_tree(entrypoint if entrypoint.is_file() else destination / "plugin.json")
         self.codex_panel.select_plugin(destination)
         action = "Replaced" if replace else "Imported"
@@ -158,17 +342,7 @@ class PluginStudioPanel(QWidget):
         plugin_dir = self._selected_plugin_dir()
         if plugin_dir is None:
             QMessageBox.information(
-                self, "Plugin Studio", "Select an experiment plugin to export."
-            )
-            return
-        try:
-            plugin_dir.relative_to(self.plugin_root.resolve())
-        except ValueError:
-            QMessageBox.information(
-                self,
-                "Plugin Studio",
-                "Built-in device plugins are part of the application and cannot be "
-                "exported from Plugin Studio.",
+                self, "Plugin Studio", "Select a plugin to export."
             )
             return
         suggested = str(Path.home() / f"{plugin_dir.name}.uosplugin")
@@ -181,7 +355,7 @@ class PluginStudioPanel(QWidget):
         if not path:
             return
         try:
-            archive_path = export_experiment_plugin(plugin_dir, Path(path))
+            archive_path = export_plugin(plugin_dir, Path(path))
         except Exception as error:
             QMessageBox.critical(self, "Plugin export failed", str(error))
             return
@@ -198,7 +372,7 @@ class PluginStudioPanel(QWidget):
             ),
             (
                 "Devices", self.device_plugin_root,
-                lambda path: (path / "plugin.py").is_file(),
+                lambda path: (path / "plugin.json").is_file(),
             ),
         )
         for title, root, is_plugin in categories:
@@ -313,6 +487,7 @@ class PluginStudioPanel(QWidget):
         experiment_count = 0
         device_count = 0
         seen_ids = set()
+        seen_device_ids = set()
         for plugin_dir in sorted(
             path for path in self.plugin_root.iterdir()
             if path.is_dir() and (path / "plugin.json").is_file()
@@ -323,13 +498,11 @@ class PluginStudioPanel(QWidget):
                 plugin_id = manifest["id"]
                 if manifest.get("type") != "experiment":
                     raise ValueError("type must be 'experiment'")
-                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", plugin_id):
-                    raise ValueError(
-                        "id must start with a letter and use letters, numbers, or underscores"
-                    )
-                if plugin_id in seen_ids:
+                validate_plugin_id(plugin_id)
+                normalized_id = plugin_id.casefold()
+                if normalized_id in seen_ids:
                     raise ValueError(f"duplicate id: {plugin_id}")
-                seen_ids.add(plugin_id)
+                seen_ids.add(normalized_id)
                 entrypoint = manifest.get("entrypoint", "plugin.py:plugin")
                 source_name, separator, export_name = entrypoint.partition(":")
                 if not separator or not export_name:
@@ -350,9 +523,47 @@ class PluginStudioPanel(QWidget):
         if self.device_plugin_root.is_dir():
             for plugin_dir in sorted(
                 path for path in self.device_plugin_root.iterdir()
-                if path.is_dir() and (path / "plugin.py").is_file()
+                if path.is_dir() and (path / "plugin.json").is_file()
             ):
-                device_count += 1
+                manifest_path = plugin_dir / "plugin.json"
+                try:
+                    manifest = json.loads(
+                        manifest_path.read_text(encoding="utf-8")
+                    )
+                    plugin_id = manifest["id"]
+                    if manifest.get("type") != "device":
+                        raise ValueError("type must be 'device'")
+                    if manifest.get("profile", "standard") not in {
+                        "standard", "composite",
+                    }:
+                        raise ValueError(
+                            "profile must be 'standard' or 'composite'"
+                        )
+                    validate_plugin_id(plugin_id)
+                    normalized_id = plugin_id.casefold()
+                    if normalized_id in seen_device_ids:
+                        raise ValueError(f"duplicate device id: {plugin_id}")
+                    seen_device_ids.add(normalized_id)
+                    entrypoint = manifest.get(
+                        "entrypoint", "plugin.py:plugin"
+                    )
+                    source_name, separator, export_name = entrypoint.partition(":")
+                    if not separator or not export_name:
+                        raise ValueError(
+                            "entrypoint must look like plugin.py:plugin"
+                        )
+                    source_path = (plugin_dir / source_name).resolve()
+                    if (
+                        source_path.parent != plugin_dir.resolve()
+                        or not source_path.is_file()
+                    ):
+                        raise ValueError("invalid or missing entrypoint")
+                    device_count += 1
+                except (
+                    OSError, KeyError, TypeError, ValueError,
+                    json.JSONDecodeError,
+                ) as error:
+                    errors.append(f"{plugin_dir.name}/plugin.json: {error}")
                 for source_path in plugin_dir.rglob("*.py"):
                     if "__pycache__" in source_path.parts:
                         continue
@@ -380,17 +591,40 @@ class PluginStudioPanel(QWidget):
             self.reload_requested.emit()
 
     def create_plugin(self):
-        plugin_id, accepted = QInputDialog.getText(
-            self, "New experiment plugin", "Plugin ID (letters, numbers, underscores):"
+        choices = (
+            "Experiment",
+            "Standard Device",
+            "Composite Device",
         )
-        plugin_id = plugin_id.strip()
+        choice, accepted = QInputDialog.getItem(
+            self, "New Plugin", "Plugin type:", choices, 0, False
+        )
         if not accepted:
             return
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", plugin_id):
-            QMessageBox.warning(self, "Plugin Studio", "Invalid plugin ID.")
+        if choice == "Experiment":
+            self._create_experiment_plugin()
+        else:
+            profile = "composite" if choice == "Composite Device" else "standard"
+            self._create_device_plugin(profile)
+
+    def _create_experiment_plugin(self):
+        plugin_id, accepted = QInputDialog.getText(
+            self, "New experiment plugin",
+            "Plugin ID (1-64 characters; start with a letter; use ASCII "
+            "letters, numbers, or underscores):",
+        )
+        if not accepted:
+            return
+        plugin_id = plugin_id.strip()
+        try:
+            validate_plugin_id(plugin_id)
+        except ValueError as error:
+            QMessageBox.warning(self, "Plugin Studio", str(error))
             return
         plugin_dir = self.plugin_root / plugin_id
-        if plugin_dir.exists():
+        if plugin_dir.exists() or self._plugin_id_in_use(
+            self.plugin_root, plugin_id
+        ):
             QMessageBox.warning(self, "Plugin Studio", "That plugin already exists.")
             return
         display_name = plugin_id.replace("_", " ").title()
@@ -423,7 +657,8 @@ class PluginStudioPanel(QWidget):
             ")\n"
         )
         panel_source = (
-            "from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget\n\n\n"
+            "from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget\n\n"
+            "from gui.widget_busy_spinner import run_busy_task\n\n\n"
             "class ExperimentPanel(QWidget):\n"
             "    def __init__(self, manager, parent=None):\n"
             "        super().__init__(parent)\n"
@@ -432,6 +667,11 @@ class PluginStudioPanel(QWidget):
             f"        self.status = QLabel({display_name!r})\n"
             "        layout.addWidget(self.status)\n"
             "        layout.addStretch()\n\n"
+            "    def run_background(self, action, success, failure):\n"
+            "        \"\"\"Run blocking work with the shared text-free loader.\"\"\"\n"
+            "        return run_busy_task(\n"
+            "            self, action, success, failure, key=\"plugin_task\"\n"
+            "        )\n\n"
             "    def execute_sequence_command(self, command, value):\n"
             "        if command != \"set_value\":\n"
             "            raise ValueError(f\"Unsupported command: {command}\")\n"
@@ -451,6 +691,139 @@ class PluginStudioPanel(QWidget):
         self.codex_panel.select_plugin(plugin_dir)
         self._write_output(f"Created panel plugin: {plugin_id}")
 
+    def _create_device_plugin(self, profile):
+        plugin_id, accepted = QInputDialog.getText(
+            self,
+            f"New {profile} device plugin",
+            "Device ID (1-64 characters; start with a letter; use ASCII "
+            "letters, numbers, or underscores):",
+        )
+        if not accepted:
+            return
+        plugin_id = plugin_id.strip()
+        try:
+            validate_plugin_id(plugin_id)
+        except ValueError as error:
+            QMessageBox.warning(self, "Plugin Studio", str(error))
+            return
+        plugin_dir = self.device_plugin_root / plugin_id
+        if plugin_dir.exists() or self._plugin_id_in_use(
+            self.device_plugin_root, plugin_id
+        ):
+            QMessageBox.warning(self, "Plugin Studio", "That device already exists.")
+            return
+        display_name = plugin_id.replace("_", " ").title()
+        plugin_dir.mkdir(parents=True)
+        manifest = {
+            "schema_version": 1,
+            "api_version": "1",
+            "type": "device",
+            "profile": profile,
+            "id": plugin_id,
+            "name": display_name,
+            "version": "0.1.0",
+            "entrypoint": "plugin.py:plugin",
+            "enabled": True,
+            "resources": [
+                {
+                    "id": "primary",
+                    "roles": ["measurement", "control"],
+                    "thread": "device_worker",
+                }
+            ],
+            "permissions": [],
+        }
+        if profile == "composite":
+            manifest["resources"].append({
+                "id": "secondary",
+                "roles": ["stream"],
+                "thread": "dedicated_qthread",
+            })
+        (plugin_dir / "plugin.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        (plugin_dir / "__init__.py").write_text(
+            '"""User device plug-in package."""\n', encoding="utf-8"
+        )
+        driver_source = (
+            '"""Hardware driver. Do not import or access Qt here."""\n\n\n'
+            "class DeviceDriver:\n"
+            "    def __init__(self, connection):\n"
+            "        self.connection = connection\n"
+            "        raise NotImplementedError(\"Implement the hardware connection\")\n\n"
+            "    def read_all(self):\n"
+            "        return {\"value\": 0.0}\n\n"
+            "    def close(self):\n"
+            "        pass\n"
+        )
+        (plugin_dir / "driver.py").write_text(driver_source, encoding="utf-8")
+        (plugin_dir / "mock_driver.py").write_text(
+            '"""Hardware-free driver used by validation and tests."""\n\n\n'
+            "class MockDeviceDriver:\n"
+            "    def __init__(self, _connection=\"mock\"):\n"
+            "        self.closed = False\n\n"
+            "    def read_all(self):\n"
+            "        return {\"value\": 0.0}\n\n"
+            "    def close(self):\n"
+            "        self.closed = True\n",
+            encoding="utf-8",
+        )
+        if profile == "composite":
+            panel_class = "CompositeDevicePanel"
+            panel_source = (
+                '"""Custom GUI for a composite device."""\n\n'
+                "from gui.panel_device import DeviceSettingsPanel\n\n\n"
+                "class CompositeDevicePanel(DeviceSettingsPanel):\n"
+                "    \"\"\"Extend this panel for secondary resources or streams.\"\"\"\n\n"
+                "    def shutdown(self):\n"
+                "        pass\n"
+            )
+        else:
+            panel_class = "StandardDevicePanel"
+            panel_source = (
+                '"""Default GUI for a standard device."""\n\n'
+                "from gui.panel_device import DeviceSettingsPanel\n\n\n"
+                "class StandardDevicePanel(DeviceSettingsPanel):\n"
+                "    \"\"\"Basic connection panel ready for device controls.\"\"\"\n\n"
+                "    pass\n"
+            )
+        (plugin_dir / "panel.py").write_text(panel_source, encoding="utf-8")
+        panel_factory_import = (
+            f"from .panel import {panel_class}\n"
+            f"    return {panel_class}(manager, plugin, parent)"
+        )
+        plugin_source = (
+            "from core.plugin_manager import DataColumn, DevicePlugin\n\n\n"
+            "def create_settings_panel(manager, parent):\n"
+            f"    {panel_factory_import}\n\n\n"
+            f"class {plugin_id}Plugin(DevicePlugin):\n"
+            f"    device_id = {plugin_id!r}\n"
+            f"    display_name = {display_name!r}\n"
+            f"    profile = {profile!r}\n"
+            "    connection_label = \"Connection\"\n"
+            "    default_connection = \"\"\n"
+            "    columns = (DataColumn(\"value\", "
+            f"{(plugin_id + '_value')!r}),)\n"
+            "    settings_factory = staticmethod(create_settings_panel)\n\n"
+            "    def connect(self, connection):\n"
+            "        from .driver import DeviceDriver\n"
+            "        return DeviceDriver(connection)\n\n\n"
+            f"plugin = {plugin_id}Plugin()\n"
+        )
+        source_path = plugin_dir / "plugin.py"
+        source_path.write_text(plugin_source, encoding="utf-8")
+        (plugin_dir / "README.md").write_text(
+            f"# {display_name}\n\n"
+            f"Device profile: `{profile}`. Complete `driver.py`, update the "
+            "measurement columns, and add contract tests before connecting hardware.\n",
+            encoding="utf-8",
+        )
+        self.refresh_tree(source_path)
+        self.codex_panel.select_plugin(plugin_dir)
+        self._write_output(
+            f"Created {profile} device plugin: {plugin_id}"
+        )
+
     def remove_plugin(self):
         items = self.tree.selectedItems()
         if not items:
@@ -464,13 +837,22 @@ class PluginStudioPanel(QWidget):
         plugin_dir = Path(plugin_value)
         try:
             plugin_dir = plugin_dir.resolve()
-            plugin_dir.relative_to(self.plugin_root.resolve())
+            category_root = next(
+                root.resolve()
+                for root in (self.plugin_root, self.device_plugin_root)
+                if plugin_dir.parent == root.resolve()
+            )
         except (OSError, ValueError):
             QMessageBox.critical(
                 self, "Plugin Studio", "The selected path is not a user plugin."
             )
             return
-        if plugin_dir.parent != self.plugin_root.resolve() or not plugin_dir.is_dir():
+        except StopIteration:
+            QMessageBox.critical(
+                self, "Plugin Studio", "The selected path is not a plugin folder."
+            )
+            return
+        if plugin_dir.parent != category_root or not plugin_dir.is_dir():
             QMessageBox.critical(
                 self, "Plugin Studio", "The selected path is not a plugin folder."
             )
@@ -514,12 +896,14 @@ class PluginStudioPanel(QWidget):
             return
         plugin_dir = Path(plugin_value)
         try:
-            plugin_dir.resolve().relative_to(self.plugin_root.resolve())
-        except ValueError:
-            QMessageBox.information(
-                self, "Plugin Studio",
-                "Device plugin IDs are defined by their DevicePlugin class and cannot "
-                "be renamed from Studio.",
+            plugin_dir = plugin_dir.resolve()
+            if plugin_dir.parent not in {
+                self.plugin_root.resolve(), self.device_plugin_root.resolve()
+            }:
+                raise ValueError("plugin is outside the editable roots")
+        except (OSError, ValueError):
+            QMessageBox.critical(
+                self, "Plugin Studio", "The selected path is not an editable plugin."
             )
             return
         manifest_path = plugin_dir / "plugin.json"
@@ -530,18 +914,25 @@ class PluginStudioPanel(QWidget):
             QMessageBox.critical(self, "Plugin Studio", f"Cannot read manifest: {error}")
             return
         new_id, accepted = QInputDialog.getText(
-            self, "Edit plugin ID", "Plugin ID:", text=old_id
+            self, "Edit plugin ID",
+            "Plugin ID (1-64 characters; start with a letter; use ASCII "
+            "letters, numbers, or underscores):",
+            text=old_id,
         )
-        new_id = new_id.strip()
-        if not accepted or new_id == old_id:
+        if not accepted:
             return
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", new_id):
-            QMessageBox.warning(
-                self, "Plugin Studio",
-                "ID must start with a letter and contain only letters, numbers, and underscores.",
-            )
+        new_id = new_id.strip()
+        if new_id == old_id:
+            return
+        try:
+            validate_plugin_id(new_id)
+        except ValueError as error:
+            QMessageBox.warning(self, "Plugin Studio", str(error))
             return
         destination = plugin_dir.parent / new_id
+        if self._plugin_id_in_use(plugin_dir.parent, new_id, exclude=plugin_dir):
+            QMessageBox.warning(self, "Plugin Studio", "That plugin ID already exists.")
+            return
         if destination.exists() and destination.resolve() != plugin_dir.resolve():
             QMessageBox.warning(self, "Plugin Studio", "That plugin ID already exists.")
             return
@@ -556,8 +947,12 @@ class PluginStudioPanel(QWidget):
             source_path = plugin_dir / entrypoint
             if source_path.is_file():
                 source = source_path.read_text(encoding="utf-8")
+                identifier_field = (
+                    "device_id" if manifest.get("type") == "device"
+                    else "experiment_id"
+                )
                 source = re.sub(
-                    r"(experiment_id\s*=\s*)(['\"])(?:\\.|(?!\2).)*\2",
+                    rf"({identifier_field}\s*=\s*)(['\"])(?:\\.|(?!\2).)*\2",
                     lambda match: match.group(1) + repr(new_id),
                     source,
                     count=1,
