@@ -154,7 +154,7 @@ class CTVideoVendorPanelTests(unittest.TestCase):
 
     def test_cancelled_gain_confirmation_never_queues_eeprom_write(self):
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.No,
         ):
             self.assertFalse(self.panel.apply_compactconnect_video_gain())
@@ -163,7 +163,7 @@ class CTVideoVendorPanelTests(unittest.TestCase):
     def test_confirmed_gain_is_queued_separately(self):
         self.panel.compactconnect_video_gain.setValue(200)
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.Yes,
         ):
             self.assertTrue(self.panel.apply_compactconnect_video_gain())
@@ -178,7 +178,7 @@ class CTVideoVendorPanelTests(unittest.TestCase):
         index = self.panel.compactconnect_anti_flicker.findData(2)
         self.panel.compactconnect_anti_flicker.setCurrentIndex(index)
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.No,
         ):
             self.assertFalse(self.panel.apply_compactconnect_anti_flicker())
@@ -188,7 +188,7 @@ class CTVideoVendorPanelTests(unittest.TestCase):
         index = self.panel.compactconnect_anti_flicker.findData(2)
         self.panel.compactconnect_anti_flicker.setCurrentIndex(index)
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.Yes,
         ):
             self.assertTrue(self.panel.apply_compactconnect_anti_flicker())

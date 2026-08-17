@@ -23,6 +23,52 @@ from PyQt6.QtWidgets import (
 
 EDITABLE_SUFFIXES = {".py", ".json", ".md", ".txt"}
 
+DEVICE_UI_STYLE_GUIDE = """# UOSLabManager device UI style contract
+
+This guide summarizes the established Keithley 2400, GPD-3303S, ZUP36-12,
+and LakeShore331 panels. Treat it as a compatibility contract, not a design
+suggestion.
+
+## Page structure
+
+- Use Qt layouts only; never use absolute widget coordinates.
+- Start with a top row containing the live summary/monitor on the left and a
+  compact read-only log on the right. Use an approximately 3:2 stretch ratio.
+- Put detailed controls in a QTabWidget. Functional controls come first,
+  safety/protection follows, and Connection is the rightmost tab.
+- End with one consistent action row: Read Device, Revert, Save Profile, Apply.
+- Let the host QScrollArea provide scrolling. Avoid fixed page widths and large
+  minimum sizes.
+
+## Controls and status
+
+- Prefer QGroupBox with QFormLayout for labeled settings and QGridLayout for
+  compact monitor values. Keep labels short and include engineering units.
+- Use green for connected/healthy, red for disconnected/fault, and orange for
+  pending or warning states. Limit custom style sheets to semantic status,
+  emergency actions, and the black monospace log; inherit the application theme
+  everywhere else.
+- Keep Connect/Disconnect status visible. Put connection details and advanced
+  serial options in the Connection tab rather than the summary area.
+- Reuse small spin-box factory helpers so decimals, ranges, and defaults are
+  consistent. Do not invent a second visual system or decorative dashboard.
+
+## Behavior
+
+- Capture QWidget values on the GUI thread, then run every DeviceProxy or
+  blocking call through run_busy_task. Update widgets only in its callbacks.
+- Use one task key for mutually exclusive panel commands and the shared delayed,
+  text-free loader. Do not create a custom loading dialog.
+- Read Device must populate controls and establish the Revert snapshot. Apply
+  must validate safety limits before queueing hardware commands.
+- Stop timers and secondary resource threads in shutdown(). Composite devices
+  may add resource-specific tabs while preserving this page skeleton.
+
+Before finishing, compare panel.py against every section above and retain the
+existing panel's established structure unless the user explicitly requests a
+different UI.
+"""
+
 
 class CodexWorker(QThread):
     completed = pyqtSignal(str, object)
@@ -66,6 +112,9 @@ class CodexWorker(QThread):
             "When plugin.json declares a composite device, you may create additional "
             "Python modules and nested packages inside the workspace for independent "
             "resources, services, platform resolvers, mocks, and tests. "
+            "For device UI work, read UI_STYLE_GUIDE.md first and follow it as a "
+            "style contract derived from the existing built-in device panels. Do "
+            "not invent a new visual language unless the user explicitly asks. "
             "Inspect existing files only as needed. Make "
             "the requested edits directly, then summarize the changes briefly."
         )
@@ -633,6 +682,8 @@ class CodexPanel(QWidget):
                 "measurement data and do not duplicate cached samples. Panels must "
                 "safely stop timers and threads in `shutdown()`. Do not "
                 "send commands to real hardware while editing or validating. "
+                "Read `UI_STYLE_GUIDE.md` before editing panel.py and check the "
+                "finished UI against every section of that guide. "
                 + (
                     "You may create any additional `.py` modules or nested Python "
                     "packages needed for independent resources, platform resolvers, "
@@ -660,6 +711,10 @@ class CodexPanel(QWidget):
         (self.staging_dir / "PLUGIN_API.md").write_text(
             api_notes, encoding="utf-8"
         )
+        if self.plugin_kind == "device":
+            (self.staging_dir / "UI_STYLE_GUIDE.md").write_text(
+                DEVICE_UI_STYLE_GUIDE, encoding="utf-8"
+            )
 
     @staticmethod
     def _read_editable_files(root):
@@ -678,6 +733,7 @@ class CodexPanel(QWidget):
     def _staged_files(self):
         files = self._read_editable_files(self.staging_dir)
         files.pop(Path("PLUGIN_API.md"), None)
+        files.pop(Path("UI_STYLE_GUIDE.md"), None)
         return files
 
     def _build_diff(self):

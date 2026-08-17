@@ -49,6 +49,12 @@ class CTVideoCalibrationPanelTests(unittest.TestCase):
         )
         self.busy_task_patch.start()
         self.addCleanup(self.busy_task_patch.stop)
+        self.calibration_busy_task_patch = patch(
+            "plugins.devices.ctvideo_3m.panel_calibration.run_busy_task",
+            side_effect=run_inline,
+        )
+        self.calibration_busy_task_patch.start()
+        self.addCleanup(self.calibration_busy_task_patch.stop)
         self.manager = FakeManager()
         self.panel = CTVideo3MPanel(self.manager, MagicMock())
         self.snapshot = CalibrationSnapshot(
@@ -100,7 +106,7 @@ class CTVideoCalibrationPanelTests(unittest.TestCase):
         self.panel.calibration_ack.setChecked(True)
         self.assertTrue(self.panel.apply_calibration_button.isEnabled())
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_calibration.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.No,
         ):
             self.assertFalse(self.panel.apply_calibration())
@@ -125,7 +131,7 @@ class CTVideoCalibrationPanelTests(unittest.TestCase):
         self.panel.calibration_offset_proposed.setValue(0.5)
         self.panel.calibration_ack.setChecked(True)
         with patch(
-            "plugins.devices.ctvideo_3m.panel.QMessageBox.warning",
+            "plugins.devices.ctvideo_3m.panel_calibration.QMessageBox.warning",
             return_value=QMessageBox.StandardButton.Yes,
         ):
             self.assertTrue(self.panel.apply_calibration())
