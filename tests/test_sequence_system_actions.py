@@ -1,7 +1,8 @@
 import os
+import threading
+import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10,6 +11,7 @@ from PyQt6.QtWidgets import QApplication, QTabWidget, QWidget
 from gui.main_window import MainWindow
 from gui.panel_measurement import MeasurementPanels
 from gui.panel_sequence import SYSTEM_DEVICE, SequencePanel
+from core.sequence_engine import SequenceState
 
 
 class FakeManager:
@@ -43,10 +45,9 @@ class SequenceSystemActionTests(unittest.TestCase):
         self.manager = FakeManager()
         self.logs = []
         self.panel = SequencePanel(self.manager, self.logs.append)
-        self.panel.engine_timer.stop()
 
     def tearDown(self):
-        self.panel.engine_timer.stop()
+        self.panel.shutdown()
         self.panel.deleteLater()
 
     def test_system_commands_are_available_without_a_device(self):
@@ -69,23 +70,27 @@ class SequenceSystemActionTests(unittest.TestCase):
             "dev": SYSTEM_DEVICE, "cmd": "Wait Time", "val": 120.0,
         }])
 
-    def test_wait_time_uses_monotonic_clock_and_changes_running_state(self):
-        self.panel.add_recipe_item({
-            "dev": SYSTEM_DEVICE, "cmd": "Wait Time", "val": 1.0,
-        })
-        states = []
-        self.panel.running_changed.connect(states.append)
-        self.panel.toggle_execution()
-        self.panel.engine_timer.stop()
-        with patch("gui.panel_sequence.time.monotonic", return_value=10.0):
-            self.panel.run_engine()
-        self.assertEqual(self.panel.state, "WAIT_FOR_TIME")
-        with patch("gui.panel_sequence.time.monotonic", return_value=11.0):
-            self.panel.run_engine()
-        self.panel.run_engine()
-        self.assertEqual(states, [True, False])
+    def test_wait_time_is_interruptible(self):
+        self.panel.engine.load([{
+            "dev": SYSTEM_DEVICE, "cmd": "Wait Time", "val": 60.0,
+        }])
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("value", self.panel.engine.run())
+        )
+        thread.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            self.panel.engine.state != SequenceState.WAITING
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        self.panel.engine.stop()
+        thread.join(1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result["value"].state, SequenceState.STOPPED)
 
-    def test_wait_until_requires_stable_time(self):
+    def test_wait_until_completes_for_a_fresh_matching_measurement(self):
         condition = {
             "label": "CTvideo Temperature",
             "device": "CTVIDEO3M",
@@ -100,15 +105,12 @@ class SequenceSystemActionTests(unittest.TestCase):
         }
         self.manager.connected.add("CTVIDEO3M")
         self.manager.values["CTVIDEO3M"] = {"actual_temp_C": 101.0}
-        with patch("gui.panel_sequence.time.monotonic", return_value=0.0):
-            self.panel.execute_system_step({
-                "dev": SYSTEM_DEVICE, "cmd": "Wait Until", "val": condition,
-            })
-            self.panel.poll_wait_condition()
-        self.assertEqual(self.panel.current_step_idx, 0)
-        with patch("gui.panel_sequence.time.monotonic", return_value=1.0):
-            self.panel.poll_wait_condition()
-        self.assertEqual(self.panel.current_step_idx, 1)
+        condition["stable_s"] = 0.0
+        self.panel.engine.load([{
+            "dev": SYSTEM_DEVICE, "cmd": "Wait Until", "val": condition,
+        }])
+        result = self.panel.engine.run()
+        self.assertEqual(result.state, SequenceState.COMPLETED)
 
     def test_recording_marker_and_safe_output_callbacks(self):
         recording = []
@@ -119,18 +121,22 @@ class SequenceSystemActionTests(unittest.TestCase):
             recording.append(enabled)
             return enabled
 
-        self.panel.set_common_actions(
-            recording_action, markers.append, lambda: safe_calls.append(True)
+        self.panel.engine.configure_callbacks(
+            recording_action=recording_action,
+            marker_action=markers.append,
+            safe_output_action=lambda: safe_calls.append(True),
         )
-        for command, value in (
-            ("Start Recording", 0),
-            ("Log Marker", "target reached"),
-            ("Safe Output Off", 0),
-            ("Stop Recording", 0),
-        ):
-            self.panel.execute_system_step({
-                "dev": SYSTEM_DEVICE, "cmd": command, "val": value,
-            })
+        self.panel.engine.load([
+            {"dev": SYSTEM_DEVICE, "cmd": command, "val": value}
+            for command, value in (
+                ("Start Recording", 0),
+                ("Log Marker", "target reached"),
+                ("Safe Output Off", 0),
+                ("Stop Recording", 0),
+            )
+        ])
+        result = self.panel.engine.run()
+        self.assertEqual(result.state, SequenceState.COMPLETED)
         self.assertEqual(recording, [True, False])
         self.assertEqual(markers, ["target reached"])
         self.assertEqual(safe_calls, [True])

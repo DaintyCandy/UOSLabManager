@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 import json
+import math
 import os
 import pkgutil
 import re
@@ -31,6 +32,45 @@ class SequenceCommand:
     default: float = 0.0
     decimals: int = 2
     requires_value: bool = True
+    choices: tuple[str, ...] = ()
+    settle_seconds: float = 0.0
+    executor: Callable[[Any, Any, Any], Any] | None = None
+
+    def validate(self, value: Any) -> Any:
+        """Validate and normalize a recipe value using plug-in metadata."""
+        if not self.requires_value:
+            return 0
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{self.label} value must be numeric")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"{self.label} value must be finite")
+        if not self.minimum <= numeric <= self.maximum:
+            raise ValueError(
+                f"{self.label} value must be between {self.minimum:g} "
+                f"and {self.maximum:g} {self.unit}".rstrip()
+            )
+        if self.choices:
+            choice = int(numeric)
+            if numeric != choice or not 0 <= choice < len(self.choices):
+                raise ValueError(f"{self.label} contains an invalid choice")
+            return choice
+        return numeric
+
+    def execute(self, device: Any, value: Any, context: Any) -> Any:
+        """Run a declared device command without GUI-side dispatch logic."""
+        if self.executor is None:
+            raise RuntimeError(f"{self.label} has no device executor")
+        return self.executor(device, self.validate(value), context)
+
+    def format_value(self, value: Any) -> str:
+        if not self.requires_value:
+            return ""
+        normalized = self.validate(value)
+        if self.choices:
+            return self.choices[normalized]
+        suffix = f" {self.unit}" if self.unit else ""
+        return f"{normalized:g}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -58,6 +98,8 @@ class DevicePlugin(ABC):
     default_connection: str = ""
     columns: tuple[DataColumn, ...] = ()
     settings_factory: Callable[[Any, Any], Any] | None = None
+    sequence_commands: tuple[SequenceCommand, ...] = ()
+    sequence_aliases: tuple[str, ...] = ()
 
     @abstractmethod
     def connect(self, connection: str):
@@ -68,6 +110,12 @@ class DevicePlugin(ABC):
 
     def format_disconnected(self) -> str:
         return f"{self.display_name} disconnected"
+
+    def get_sequence_command(self, key: str) -> SequenceCommand | None:
+        return next(
+            (command for command in self.sequence_commands if command.key == key),
+            None,
+        )
 
 
 def load_device_plugins(*, reload_modules: bool = False) -> dict[str, DevicePlugin]:

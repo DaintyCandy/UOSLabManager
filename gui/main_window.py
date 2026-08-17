@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         self.measurement = MeasurementPanels(self.manager, self.plugins, self.log)
-        self.sequence_panel = SequencePanel(self.manager, self.log)
+        self.sequence_panel = SequencePanel(self.manager, self.log, self.plugins)
         default_output_dir = str(storage_dir("camera_recordings"))
         output_dir = self.window_settings.value("camera/output_dir", default_output_dir)
         self.camera_panel = CameraWorkspace(output_dir, self.log)
@@ -418,6 +418,7 @@ class MainWindow(QMainWindow):
         self.measurement.plugins = device_plugins
         self.dashboard.set_experiment_plugins(experiment_plugins)
         self.dashboard.set_device_plugins(device_plugins)
+        self.sequence_panel.set_device_plugins(device_plugins)
         self.sequence_panel.set_experiment_plugins(experiment_plugins)
         self.plugin_studio.codex_panel.set_activity(
             f"Reloaded {len(experiment_plugins)} experiment plugins and "
@@ -567,7 +568,7 @@ class MainWindow(QMainWindow):
         self.plugin_studio.shutdown()
         self.clock_timer.stop()
         self.measurement.timer.stop()
-        self.sequence_panel.engine_timer.stop()
+        self.sequence_panel.shutdown()
         self.dashboard.refresh_timer.stop()
         self.save_window_layout()
         self.camera_panel.stop_preview()
