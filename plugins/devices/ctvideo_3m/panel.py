@@ -33,6 +33,10 @@ class CTVideo3MPanel(
         self.plugin = plugin
         self.main_window = parent
         self.snapshot = None
+        # Exact pyrometer values read from the connected device.  This is kept
+        # separate from the UI/profile snapshot so opening a connection can
+        # never turn profile defaults into device writes.
+        self.device_settings_snapshot = None
         self.plot_started_at = time.monotonic()
         self.plot_times = []
         self.plot_values = {key: [] for key in self.COLORS}
@@ -480,6 +484,7 @@ class CTVideo3MPanel(
         self.disconnect_device() if self.get_device() else self.connect_device()
 
     def connect_device(self):
+        self.device_settings_snapshot = None
         self._invalidate_calibration_snapshot(
             "Read calibration after connecting to verify the device identity."
         )
@@ -512,6 +517,7 @@ class CTVideo3MPanel(
         def connected(result):
             device_info, camera_error, settings = result
             self._apply_device_settings(settings)
+            self.log("Initial device settings read and preserved (no writes)")
             if camera_error is not None:
                 self.log(
                     f"Camera mapping failed ({camera_error}); "
@@ -600,6 +606,7 @@ class CTVideo3MPanel(
             "Disconnected. Reconnect and read calibration before writing."
         )
         def disconnected(_result):
+            self.device_settings_snapshot = None
             self.log("Pyrometer communication disconnected")
             self._notify_main()
 
@@ -703,32 +710,64 @@ class CTVideo3MPanel(
         self.average_time.setValue(values["average_time_s"])
         self.smart_averaging.setChecked(values["smart_averaging"])
         self.peak_hold.setValue(values["peak_hold_s"])
+        self.device_settings_snapshot = {
+            "emissivity": float(values["emissivity"]),
+            "transmission": float(values["transmission"]),
+            "average_time_s": float(values["average_time_s"]),
+            "smart_averaging": bool(values["smart_averaging"]),
+            "peak_hold_s": float(values["peak_hold_s"]),
+        }
         self.snapshot = deepcopy(self.profile_data())
+
+    def _edited_device_settings(self):
+        return {
+            "emissivity": self.emissivity.value(),
+            "transmission": self.transmission.value(),
+            "average_time_s": self.average_time.value(),
+            "smart_averaging": self.smart_averaging.isChecked(),
+            "peak_hold_s": self.peak_hold.value(),
+        }
 
     def apply_settings(self):
         device = self.get_device()
         if device is None:
             self.show_error("Connect the pyrometer first.")
             return
-        emissivity = self.emissivity.value()
-        transmission = self.transmission.value()
-        average_time = self.average_time.value()
-        smart_averaging = self.smart_averaging.isChecked()
-        peak_hold = self.peak_hold.value()
+        if self.device_settings_snapshot is None:
+            self.show_error(
+                "Read the current device settings before writing. "
+                "Reconnect or press Read Device first."
+            )
+            return
+        requested = self._edited_device_settings()
+        changed = {
+            key: value for key, value in requested.items()
+            if value != self.device_settings_snapshot[key]
+        }
 
         def apply():
-            device.set_emissivity(emissivity)
-            device.set_transmission(transmission)
-            device.set_average_time(average_time)
-            device.set_smart_averaging(smart_averaging)
-            device.set_peak_hold_time(peak_hold)
+            setters = {
+                "emissivity": device.set_emissivity,
+                "transmission": device.set_transmission,
+                "average_time_s": device.set_average_time,
+                "smart_averaging": device.set_smart_averaging,
+                "peak_hold_s": device.set_peak_hold_time,
+            }
+            for key, value in changed.items():
+                setters[key](value)
+            return device.read_settings()
 
-        def completed(_result):
+        def completed(readback):
+            self._apply_device_settings(readback)
             display_applied = self.apply_video_display_settings(log_change=False)
-            self.snapshot = deepcopy(self.profile_data())
             self.log(
-                "Pyrometer and video display settings applied"
-                if display_applied else "Pyrometer settings applied"
+                (
+                    "Changed pyrometer settings applied: "
+                    + ", ".join(changed)
+                    if changed else
+                    "Pyrometer settings unchanged; no device write sent"
+                )
+                + ("; video display applied" if display_applied else "")
             )
 
         run_busy_task(

@@ -12,6 +12,13 @@ from plugins.devices.ctvideo_3m.driver import (
 )
 
 
+class CTVideoDependencyTests(unittest.TestCase):
+    def test_missing_pyserial_reports_actionable_error(self):
+        with patch("plugins.devices.ctvideo_3m.driver.serial", None):
+            with self.assertRaisesRegex(RuntimeError, "pip install pyserial"):
+                CTVideo3M("COM6")
+
+
 class CTVideoCalibrationTests(unittest.TestCase):
     def setUp(self):
         self.serial_patch = patch("plugins.devices.ctvideo_3m.driver.serial.Serial")

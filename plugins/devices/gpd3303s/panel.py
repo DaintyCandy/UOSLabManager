@@ -59,7 +59,7 @@ class GPD3303SPanel(QWidget):
         self.write_terminator_input = QLineEdit("\\n")
         self.read_terminator_input = QLineEdit("\\r")
         self.output_off_on_connect = QCheckBox("Send OUT0 after connect")
-        self.output_off_on_connect.setChecked(True)
+        self.output_off_on_connect.setChecked(False)
         self.output_off_on_close = QCheckBox("Send OUT0 on disconnect")
         self.output_off_on_close.setChecked(True)
         self.connect_button = QPushButton("Connect")

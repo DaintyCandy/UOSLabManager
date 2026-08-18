@@ -67,7 +67,20 @@ class CTVideoCalibrationPanelTests(unittest.TestCase):
         )
         self.device = MagicMock()
         self.device.read_calibration.return_value = self.snapshot
+        self.device.read_settings.return_value = {
+            "emissivity": 1.0,
+            "transmission": 1.0,
+            "average_time_s": 0.0,
+            "smart_averaging": False,
+            "peak_hold_s": 0.0,
+        }
         self.manager.device = self.device
+        self.panel._apply_device_settings(self.device.read_settings())
+        self.device.reset_mock()
+        self.device.read_calibration.return_value = self.snapshot
+        self.device.read_settings.return_value = dict(
+            self.panel.device_settings_snapshot
+        )
         self.panel._video_attach_attempted = True
         self.panel.sync_connection_status()
 

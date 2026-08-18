@@ -11,6 +11,30 @@ from core.plugin_manager import (
 
 
 class TestUserExperimentPlugins(unittest.TestCase):
+    def test_obsolete_ctvideo_panel_is_backed_up_and_migrated(self):
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
+            source = Path(source_directory)
+            destination = Path(destination_directory)
+            relative = Path("devices/ctvideo_3m/panel.py")
+            (source / relative).parent.mkdir(parents=True)
+            (destination / relative).parent.mkdir(parents=True)
+            (source / relative).write_text("latest CTvideo panel\n", encoding="utf-8")
+            legacy = "from gui.panel_ctvideo import CTVideoView\n"
+            (destination / relative).write_text(legacy, encoding="utf-8")
+
+            _migrate_legacy_bundled_plugins(source, destination)
+
+            self.assertEqual(
+                (destination / relative).read_text(encoding="utf-8"),
+                "latest CTvideo panel\n",
+            )
+            self.assertEqual(
+                (destination / relative).with_suffix(".py.legacy-backup").read_text(
+                    encoding="utf-8"
+                ),
+                legacy,
+            )
+
     def test_obsolete_heating_panel_is_backed_up_and_migrated(self):
         with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
             source = Path(source_directory)
