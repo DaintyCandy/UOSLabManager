@@ -6,11 +6,13 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import QRect
 from PyQt6.QtWidgets import QApplication, QTabWidget, QWidget
 
 from gui.main_window import MainWindow
 from gui.panel_measurement import MeasurementPanels
 from gui.panel_sequence import SYSTEM_DEVICE, SequencePanel
+from gui.widget_busy_spinner import BusySpinner, BusySpinnerDialog, run_busy_task
 from core.sequence_engine import SequenceState
 
 
@@ -167,6 +169,78 @@ class SequenceSystemActionTests(unittest.TestCase):
         MainWindow.update_sequence_tab_state(window, False)
         self.assertEqual(tabs.tabText(index), "Sequence")
         self.assertEqual(tabs.tabBar().tabTextColor(index).name(), "#ffb74d")
+
+    def test_restored_window_geometry_is_bounded_to_current_screen(self):
+        available = QRect(0, 29, 1920, 991)
+        oversized = QRect(-20, -10, 1950, 1100)
+        bounded = MainWindow.bounded_window_geometry(oversized, available)
+        self.assertEqual(bounded, available)
+
+    def test_offscreen_window_is_moved_inside_work_area(self):
+        available = QRect(1920, 0, 1920, 1080)
+        offscreen = QRect(5000, 2000, 1360, 800)
+        bounded = MainWindow.bounded_window_geometry(offscreen, available)
+        self.assertTrue(available.contains(bounded))
+        self.assertEqual(bounded.size(), offscreen.size())
+
+    def test_fast_busy_task_runs_off_gui_thread_without_showing_loader(self):
+        parent = QWidget()
+        completed = []
+        gui_thread = threading.current_thread().name
+        handle = run_busy_task(
+            parent,
+            lambda: threading.current_thread().name,
+            completed.append,
+            self.fail,
+            key="test",
+        )
+        self.assertFalse(handle.dialog.isVisible())
+        loader_was_visible = False
+        deadline = time.monotonic() + 2.0
+        while not completed and time.monotonic() < deadline:
+            self.app.processEvents()
+            if not completed:
+                loader_was_visible = (
+                    loader_was_visible or handle.dialog.isVisible()
+                )
+            time.sleep(0.005)
+        self.assertTrue(completed)
+        self.assertFalse(loader_was_visible)
+        self.assertNotEqual(completed[0], gui_thread)
+        self.assertFalse(parent._busy_task_handles)
+        parent.deleteLater()
+
+    def test_slow_busy_task_shows_animated_loader_after_delay(self):
+        parent = QWidget()
+        completed = []
+        handle = run_busy_task(
+            parent,
+            lambda: time.sleep(0.45),
+            completed.append,
+            self.fail,
+            key="slow_test",
+        )
+        spinner = handle.dialog.findChild(BusySpinner)
+        initial_angle = spinner._angle
+        loader_was_visible = False
+        angle_changed = False
+        started_at = time.monotonic()
+        deadline = started_at + 2.0
+        while not completed and time.monotonic() < deadline:
+            self.app.processEvents()
+            if not completed and handle.dialog.isVisible():
+                loader_was_visible = True
+                angle_changed = angle_changed or spinner._angle != initial_angle
+            time.sleep(0.005)
+        self.assertTrue(completed)
+        self.assertTrue(loader_was_visible)
+        self.assertTrue(angle_changed)
+        self.assertGreaterEqual(
+            time.monotonic() - started_at,
+            (BusySpinnerDialog.SHOW_DELAY_MS + 250) / 1000.0,
+        )
+        self.assertFalse(parent._busy_task_handles)
+        parent.deleteLater()
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtGui import QAction, QColor
-from PyQt6.QtCore import QSettings, Qt, QTimer
+from PyQt6.QtGui import QAction, QColor, QGuiApplication
+from PyQt6.QtCore import QRect, QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPushButton, QScrollArea, QSplitter, QSizePolicy, QTabBar, QTabWidget,
@@ -20,6 +20,7 @@ from .panel_measurement import MeasurementPanels
 from .panel_sequence import SequencePanel
 from .panel_settings import SettingsPanel
 from .plugin_studio import PluginStudioPanel
+from .widget_busy_spinner import run_busy_task, visible_busy_dialog
 
 __all__ = ["MainWindow"]
 
@@ -163,7 +164,10 @@ class MainWindow(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(self._build_header())
-        self.dashboard.setFixedWidth(240)
+        # Keep the sidebar useful without making the top-level window wider
+        # than a 1920 px display at 125% Windows scaling.
+        self.dashboard.setMinimumWidth(180)
+        self.dashboard.setMaximumWidth(240)
         self.sidebar_open = True
         body = QWidget()
         body_layout = QHBoxLayout(body)
@@ -341,7 +345,15 @@ class MainWindow(QMainWindow):
         if panel is None:
             if plugin.settings_factory is None:
                 return
-            panel = plugin.settings_factory(self.manager, self)
+            try:
+                with visible_busy_dialog(self):
+                    panel = plugin.settings_factory(self.manager, self)
+            except Exception as error:
+                QMessageBox.critical(
+                    self, "Device plugin failed",
+                    f"Could not open {plugin.display_name}:\n\n{error}",
+                )
+                return
             self.device_tabs[device_id] = panel
             container = QScrollArea()
             container.setWidgetResizable(True)
@@ -360,7 +372,8 @@ class MainWindow(QMainWindow):
             panel = self.experiment_tabs.get(experiment_id)
             if panel is None:
                 try:
-                    panel = plugin.panel_factory(self.manager, self)
+                    with visible_busy_dialog(self):
+                        panel = plugin.panel_factory(self.manager, self)
                 except Exception as error:
                     message = (
                         f"Could not open {plugin.display_name}:\n\n{error}"
@@ -406,16 +419,26 @@ class MainWindow(QMainWindow):
                 "reloading device plugins.",
             )
             return
-        try:
-            experiment_plugins = load_experiment_plugins()
-            device_plugins = load_device_plugins(reload_modules=True)
-        except Exception as error:
-            QMessageBox.critical(self, "Plugin reload failed", str(error))
-            self.plugin_studio.codex_panel.set_activity(f"Reload failed:\n{error}")
-            return
+        run_busy_task(
+            self,
+            lambda: (
+                load_experiment_plugins(),
+                load_device_plugins(reload_modules=True),
+            ),
+            self._plugins_reloaded,
+            self._plugin_reload_failed,
+            key="plugin_reload",
+        )
+
+    def _plugin_reload_failed(self, error):
+        QMessageBox.critical(self, "Plugin reload failed", str(error))
+        self.plugin_studio.codex_panel.set_activity(f"Reload failed:\n{error}")
+
+    def _plugins_reloaded(self, result):
+        experiment_plugins, device_plugins = result
         self.experiment_plugins = experiment_plugins
         self.plugins = device_plugins
-        self.measurement.plugins = device_plugins
+        self.measurement.set_plugins(device_plugins)
         self.dashboard.set_experiment_plugins(experiment_plugins)
         self.dashboard.set_device_plugins(device_plugins)
         self.sequence_panel.set_device_plugins(device_plugins)
@@ -608,3 +631,42 @@ class MainWindow(QMainWindow):
         self.measurement.split_graph_button.setChecked(split_graph)
         split_camera = self.window_settings.value("camera/split_view", False, type=bool)
         self.camera_panel.split_button.setChecked(split_camera)
+        self._fit_window_to_available_screen()
+
+    @staticmethod
+    def bounded_window_geometry(rect, available, minimum_width=1000,
+                                minimum_height=640):
+        """Return a window rectangle fully contained in a screen work area."""
+        width = min(
+            max(int(minimum_width), rect.width()),
+            available.width(),
+        )
+        height = min(
+            max(int(minimum_height), rect.height()),
+            available.height(),
+        )
+        maximum_x = available.right() - width + 1
+        maximum_y = available.bottom() - height + 1
+        x = min(max(rect.x(), available.left()), maximum_x)
+        y = min(max(rect.y(), available.top()), maximum_y)
+        return QRect(x, y, width, height)
+
+    def _fit_window_to_available_screen(self):
+        """Clamp restored geometry after monitor or DPI configuration changes."""
+        screens = QGuiApplication.screens()
+        if not screens:
+            return
+        rect = self.geometry()
+        screen = QGuiApplication.screenAt(rect.center())
+        if screen is None:
+            def overlap_area(candidate):
+                intersection = rect.intersected(candidate.availableGeometry())
+                return intersection.width() * intersection.height()
+
+            screen = max(screens, key=overlap_area)
+            if overlap_area(screen) <= 0:
+                screen = QGuiApplication.primaryScreen()
+        available = screen.availableGeometry()
+        bounded = self.bounded_window_geometry(rect, available)
+        if bounded != rect:
+            self.setGeometry(bounded)

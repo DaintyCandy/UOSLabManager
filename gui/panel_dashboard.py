@@ -19,7 +19,7 @@ class DashboardPanel(QWidget):
         self.device_items = {}
         self.experiment_items = {}
         self.active_experiment_id = None
-        self.setMinimumWidth(220)
+        self.setMinimumWidth(180)
         self._build_ui()
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(1000)
@@ -107,9 +107,16 @@ class DashboardPanel(QWidget):
     def refresh_devices(self):
         for device_id, item in self.device_items.items():
             connected = self.manager.get_device(device_id) is not None
+            metrics = self.manager.get_metrics(device_id)
             marker = "●" if connected else "○"
             item.setText(f"{marker} {self.plugins[device_id].display_name}")
             item.setForeground(QBrush(QColor("#2ecc71" if connected else "#808080")))
+            worker_name = metrics.get("worker_name")
+            if worker_name:
+                state = "running" if metrics.get("worker_alive") else "stopped"
+                item.setToolTip(f"Thread: {worker_name} ({state})")
+            else:
+                item.setToolTip("No device worker")
 
     def set_active_experiment(self, experiment_id):
         if experiment_id not in self.experiment_plugins:

@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .driver import ZUP36_12
+from gui.widget_busy_spinner import run_busy_task
 
 
 class ZUP3612Panel(QWidget):
@@ -261,11 +262,12 @@ class ZUP3612Panel(QWidget):
     def connect_device(self):
         if self.get_device() is not None:
             return
-        try:
-            port = self.port_input.text().strip()
-            self.last_disconnect_error = ""
-            self.applied_protection = None
-            settings = self.connection_settings()
+        port = self.port_input.text().strip()
+        self.last_disconnect_error = ""
+        self.applied_protection = None
+        settings = self.connection_settings()
+
+        def connect():
             connection_info = {}
 
             def create_device():
@@ -274,9 +276,16 @@ class ZUP3612Panel(QWidget):
                 connection_info["identification_error"] = device.get_identification_error()
                 return device
 
-            self.manager.add_device(
-                "ZUP", create_device
-            )
+            self.manager.add_device("ZUP", create_device)
+            try:
+                connection_info["settings"] = self.get_device().read_settings()
+                return connection_info
+            except Exception:
+                self.manager.remove_device("ZUP")
+                raise
+
+        def connected(connection_info):
+            self._apply_device_settings(connection_info.pop("settings"))
             model = connection_info.get("model", "Unknown")
             self.log(
                 f"Connected: {model} | {port}, {settings['baudrate']} baud, "
@@ -292,11 +301,21 @@ class ZUP3612Panel(QWidget):
                 )
             self.monitor_timer.start()
             self._notify_main()
-            self.read_device()
-        except Exception as error:
+
+        def failed(error):
             if self.get_device() is not None:
-                self.manager.remove_device("ZUP")
+                run_busy_task(
+                    self, lambda: self.manager.remove_device("ZUP"),
+                    lambda _result: self._notify_main(),
+                    lambda cleanup_error: self.log(str(cleanup_error)),
+                    key="connection_cleanup",
+                )
             self.show_error(error)
+
+        run_busy_task(
+            self, connect, connected, failed,
+            key="connection",
+        )
 
     def connection_settings(self):
         return {
@@ -316,12 +335,35 @@ class ZUP3612Panel(QWidget):
         self.ramp_state = None
         self.read_after_ramp = False
         device = self.get_device()
-        if device and self.output_off_disconnect.isChecked():
-            device.output_off()
-        self.manager.remove_device("ZUP")
-        self.monitor_timer.stop()
-        self.log("Disconnected")
-        self._notify_main()
+        if device is None:
+            return
+        output_off = self.output_off_disconnect.isChecked()
+
+        def disconnect():
+            error = None
+            try:
+                if output_off:
+                    device.output_off()
+            except Exception as caught:
+                error = caught
+            finally:
+                self.manager.remove_device("ZUP")
+            if error is not None:
+                raise error
+
+        def disconnected(_result):
+            self.monitor_timer.stop()
+            self.log("Disconnected")
+            self._notify_main()
+
+        def failed(error):
+            disconnected(None)
+            self.show_error(error)
+
+        run_busy_task(
+            self, disconnect, disconnected, failed,
+            key="connection",
+        )
 
     def refresh_monitoring(self):
         device = self.get_device()
@@ -357,23 +399,35 @@ class ZUP3612Panel(QWidget):
             if self.block_output_on_fault.isChecked() and faults and state["output_on"]:
                 self.ramp_timer.stop()
                 self.ramp_state = None
-                device.output_off()
-                self.log(f"Safety interlock: output disabled ({', '.join(faults)})")
+                fault_text = ", ".join(faults)
+                run_busy_task(
+                    self,
+                    device.output_off,
+                    lambda _result: self.log(
+                        f"Safety interlock: output disabled ({fault_text})"
+                    ),
+                    lambda error: self.log(f"Safety interlock failed: {error}"),
+                    key="safety_interlock",
+                )
             self.update_realtime_status()
         except Exception as error:
             self.monitor_labels["communication"].setText(str(error))
             self.monitor_timer.stop()
-            self.manager.remove_device("ZUP")
-            self.sync_connection_status()
-            self.log(f"Connection lost; changed to Disconnected: {error}")
-            if self.main_window:
-                self.main_window.update_device_status()
+            message = f"Connection lost; changed to Disconnected: {error}"
 
-    def _load_device_settings(self):
-        device = self.get_device()
-        if device is None:
-            raise RuntimeError("Connect the device first.")
-        values = device.read_settings()
+            def removed(_result):
+                self.sync_connection_status()
+                self.log(message)
+                if self.main_window:
+                    self.main_window.update_device_status()
+
+            run_busy_task(
+                self, lambda: self.manager.remove_device("ZUP"),
+                removed, lambda remove_error: self.log(str(remove_error)),
+                key="connection_lost",
+            )
+
+    def _apply_device_settings(self, values):
         self.voltage_setpoint.setValue(values["voltage"])
         self.current_limit.setValue(values["current"])
         self.foldback_enabled.setChecked(values["foldback"])
@@ -382,14 +436,21 @@ class ZUP3612Panel(QWidget):
         self.snapshot = deepcopy(self.profile_data())
         self.update_summary_settings()
         self.refresh_monitoring()
-        return values
 
     def read_device(self):
-        try:
-            self._load_device_settings()
+        device = self.get_device()
+        if device is None:
+            self.show_error("Connect the device first.")
+            return
+
+        def completed(values):
+            self._apply_device_settings(values)
             self.log("Device settings read")
-        except Exception as error:
-            self.show_error(error)
+
+        run_busy_task(
+            self, device.read_settings, completed, self.show_error,
+            key="device_action",
+        )
 
     def apply_settings(self):
         device = self.get_device()
@@ -401,54 +462,64 @@ class ZUP3612Panel(QWidget):
         if voltage > self.max_voltage.value() or current > self.max_current.value() or voltage * current > self.max_power.value():
             self.show_error("Output setting exceeds the Safety limits.")
             return
-        try:
-            self.ramp_timer.stop()
-            self.ramp_state = None
-            self.read_after_ramp = False
-            device.output_off()
-            device.set_ovp(self.ovp_limit.value())
-            device.set_uvp(self.uvp_limit.value())
-            device.set_foldback(self.foldback_enabled.isChecked())
-            device.set_auto_restart(self.auto_restart.isChecked())
-            ramp_voltage = self.output_enabled.isChecked() and self.voltage_ramp_enabled.isChecked()
-            ramp_current = self.output_enabled.isChecked() and self.current_ramp_enabled.isChecked()
-            start_voltage = 0.0 if ramp_voltage else voltage
-            start_current = 0.0 if ramp_current else current
-            if not ramp_voltage:
-                device.set_voltage(voltage)
-            else:
+        output_enabled = self.output_enabled.isChecked()
+        ramp_voltage = output_enabled and self.voltage_ramp_enabled.isChecked()
+        ramp_current = output_enabled and self.current_ramp_enabled.isChecked()
+        start_voltage = 0.0 if ramp_voltage else voltage
+        start_current = 0.0 if ramp_current else current
+        ovp = self.ovp_limit.value()
+        uvp = self.uvp_limit.value()
+        foldback = self.foldback_enabled.isChecked()
+        auto_restart = self.auto_restart.isChecked()
+        self.ramp_timer.stop()
+        self.ramp_state = None
+        self.read_after_ramp = False
+
+        def apply():
+            try:
+                device.output_off()
+                device.set_ovp(ovp)
+                device.set_uvp(uvp)
+                device.set_foldback(foldback)
+                device.set_auto_restart(auto_restart)
                 device.set_voltage(start_voltage)
-            if not ramp_current:
-                device.set_current(current)
-            else:
                 device.set_current(start_current)
-            if self.output_enabled.isChecked():
-                device.output_on()
-                if ramp_voltage or ramp_current:
-                    self.start_output_ramp(
-                        start_voltage, start_current,
-                        voltage, current, ramp_voltage, ramp_current,
-                    )
-                    self.read_after_ramp = True
-            self.applied_protection = (
-                self.ovp_limit.value(), self.uvp_limit.value()
-            )
-            if self.ramp_state is None:
-                values = self._load_device_settings()
-                self.log(
-                    "Settings applied and read back: "
-                    f"{values['voltage']:.2f} V, {values['current']:.3f} A"
+                if output_enabled:
+                    device.output_on()
+                return None if (ramp_voltage or ramp_current) else device.read_settings()
+            except Exception as error:
+                reset_errors = self._safe_zero_output(device)
+                detail = f"{error}"
+                if reset_errors:
+                    detail += f"; safety reset: {'; '.join(reset_errors)}"
+                raise RuntimeError(detail) from error
+
+        def completed(values):
+            self.applied_protection = (ovp, uvp)
+            if ramp_voltage or ramp_current:
+                self.start_output_ramp(
+                    start_voltage, start_current,
+                    voltage, current, ramp_voltage, ramp_current,
                 )
-            else:
+                self.read_after_ramp = True
                 self.snapshot = deepcopy(self.profile_data())
                 self.refresh_monitoring()
                 self.log("Settings applied; readback will run after the ramp")
-        except Exception as error:
+                return
+            self._apply_device_settings(values)
+            self.log(
+                "Settings applied and read back: "
+                f"{values['voltage']:.2f} V, {values['current']:.3f} A"
+            )
+
+        def failed(error):
             self.read_after_ramp = False
-            reset_errors = self._safe_zero_output(device)
-            if reset_errors:
-                self.log(f"Apply safety-reset warning: {'; '.join(reset_errors)}")
             self.show_error(error)
+
+        run_busy_task(
+            self, apply, completed, failed,
+            key="device_action",
+        )
 
     @staticmethod
     def _safe_zero_output(device):
@@ -466,15 +537,20 @@ class ZUP3612Panel(QWidget):
         return errors
 
     def clear_faults(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            self.get_device().write(":DCL;")
-            self.refresh_monitoring()
-            self.log("Fault registers cleared")
-        except Exception as error:
-            self.show_error(error)
+        run_busy_task(
+            self,
+            lambda: device.write(":DCL;"),
+            lambda _result: (
+                self.refresh_monitoring(),
+                self.log("Fault registers cleared"),
+            ),
+            self.show_error,
+            key="device_action",
+        )
 
     def start_output_ramp(self, voltage, current, target_voltage, target_current,
                           ramp_voltage, ramp_current):
@@ -503,42 +579,73 @@ class ZUP3612Panel(QWidget):
         state = self.ramp_state
         now = time.monotonic()
         elapsed = max(0.001, now - state["updated_at"])
-        state["updated_at"] = now
-        try:
+        next_voltage = state["voltage"]
+        next_current = state["current"]
+        if state["ramp_voltage"]:
+            next_voltage = self._approach(
+                state["voltage"], state["target_voltage"],
+                self.voltage_ramp_rate.value() * elapsed,
+            )
+        if state["ramp_current"]:
+            next_current = self._approach(
+                state["current"], state["target_current"],
+                self.current_ramp_rate.value() * elapsed,
+            )
+
+        def write_step():
             if state["ramp_voltage"]:
-                state["voltage"] = self._approach(
-                    state["voltage"], state["target_voltage"],
-                    self.voltage_ramp_rate.value() * elapsed,
-                )
-                device.set_voltage(state["voltage"])
+                device.set_voltage(next_voltage)
             if state["ramp_current"]:
-                state["current"] = self._approach(
-                    state["current"], state["target_current"],
-                    self.current_ramp_rate.value() * elapsed,
-                )
-                device.set_current(state["current"])
-        except Exception as error:
+                device.set_current(next_current)
+
+        def failed(error):
             self.ramp_timer.stop()
             self.ramp_state = None
             self.read_after_ramp = False
             self.show_error(error)
-            return
-        voltage_done = not state["ramp_voltage"] or state["voltage"] == state["target_voltage"]
-        current_done = not state["ramp_current"] or state["current"] == state["target_current"]
-        if voltage_done and current_done:
+
+        def completed(_result):
+            if self.ramp_state is not state:
+                return
+            state["voltage"] = next_voltage
+            state["current"] = next_current
+            state["updated_at"] = time.monotonic()
+            voltage_done = (
+                not state["ramp_voltage"]
+                or next_voltage == state["target_voltage"]
+            )
+            current_done = (
+                not state["ramp_current"]
+                or next_current == state["target_current"]
+            )
+            if not (voltage_done and current_done):
+                return
             self.ramp_timer.stop()
             self.ramp_state = None
             self.log("Output ramp completed")
             if self.read_after_ramp:
                 self.read_after_ramp = False
-                try:
-                    values = self._load_device_settings()
+
+                def read_completed(values):
+                    self._apply_device_settings(values)
                     self.log(
                         "Ramp settings read back: "
-                        f"{values['voltage']:.2f} V, {values['current']:.3f} A"
+                        f"{values['voltage']:.2f} V, "
+                        f"{values['current']:.3f} A"
                     )
-                except Exception as error:
-                    self.show_error(f"Ramp completed, but readback failed: {error}")
+
+                run_busy_task(
+                    self, device.read_settings, read_completed,
+                    lambda error: self.show_error(
+                        f"Ramp completed, but readback failed: {error}"
+                    ),
+                    key="device_action",
+                )
+
+        run_busy_task(
+            self, write_step, completed, failed,
+            key="output_ramp",
+        )
 
     def update_summary_settings(self, _value=None):
         if not hasattr(self, "monitor_labels") or not hasattr(self, "voltage_setpoint"):

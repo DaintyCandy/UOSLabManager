@@ -59,8 +59,8 @@ class SettingsPanel(QWidget):
         self.pending_theme_name = display_name
         self.theme_combo.setEnabled(False)
         self.theme_spinner = BusySpinnerDialog(self)
-        self.theme_spinner.show()
-        QTimer.singleShot(80, self.apply_pending_theme)
+        self.theme_spinner.show_after()
+        QTimer.singleShot(0, self.apply_pending_theme)
 
     def apply_pending_theme(self):
         try:
@@ -70,10 +70,16 @@ class SettingsPanel(QWidget):
                 self.theme_changed(theme)
         finally:
             if self.theme_spinner is not None:
-                self.theme_spinner.close()
-                self.theme_spinner.deleteLater()
-                self.theme_spinner = None
-            self.theme_combo.setEnabled(True)
+                dialog = self.theme_spinner
+
+                def loading_finished():
+                    if self.theme_spinner is dialog:
+                        self.theme_spinner = None
+                    self.theme_combo.setEnabled(True)
+
+                dialog.finish(loading_finished)
+            else:
+                self.theme_combo.setEnabled(True)
 
     def choose_camera_path(self):
         path = QFileDialog.getExistingDirectory(self, "Choose Camera Save Folder", self.camera_path.text())

@@ -13,6 +13,7 @@ from plugins.devices.ctvideo_3m.video import CTVideoView
 from plugins.devices.ctvideo_3m.connection import create_ctvideo, default_connection
 from plugins.devices.ctvideo_3m.usb_camera import resolve_camera_for_port
 from plugins.devices.zup36_12.driver import ZUP36_12
+from gui.widget_busy_spinner import run_busy_task
 
 
 class HeatingPIDWorker(QThread):
@@ -496,13 +497,22 @@ class HeatingControlPanel(QWidget):
 
     def connect_zup(self):
         port = self.zup_port.text().strip()
-        try:
+
+        def connect():
             self.manager.add_device("ZUP", lambda: ZUP36_12(port), interval=0.5)
+
+        def connected(_result):
             self.owned_devices.add("ZUP")
             self.log(f"ZUP 36-12 connected: {port}")
             self._notify_main()
-        except Exception as error:
+
+        def failed(error):
             self.show_error("ZUP 36-12", error)
+
+        run_busy_task(
+            self, connect, connected, failed,
+            key="zup_connection",
+        )
 
     def disconnect_zup(self):
         if self.control_active:
@@ -528,27 +538,37 @@ class HeatingControlPanel(QWidget):
 
     def connect_ctvideo(self):
         port = self.ctvideo_port.text().strip()
-        created_device = False
-        try:
+
+        def connect():
+            created_device = False
+            connection_port = port
             if self.manager.get_device("CTVIDEO3M") is None:
                 self.manager.add_device(
                     "CTVIDEO3M",
-                    lambda: create_ctvideo(port, verify=True),
+                    lambda: create_ctvideo(connection_port, verify=True),
                     interval=0.1,
                 )
-                self.owned_devices.add("CTVIDEO3M")
                 created_device = True
             else:
-                self.log("Using the existing CTvideo 3M serial connection")
-                port = self.manager.get_device("CTVIDEO3M").get_port()
-                self.ctvideo_port.setText(port)
+                connection_port = self.manager.get_device("CTVIDEO3M").get_port()
             try:
-                camera = resolve_camera_for_port(port)
+                camera = resolve_camera_for_port(connection_port)
             except Exception as camera_error:
                 camera = {
                     "CameraIndex": 1,
                     "CameraName": "CTvideo OpenCV fallback",
                 }
+                return created_device, connection_port, camera, camera_error
+            return created_device, connection_port, camera, None
+
+        def connected(result):
+            created_device, connected_port, camera, camera_error = result
+            if created_device:
+                self.owned_devices.add("CTVIDEO3M")
+            else:
+                self.log("Using the existing CTvideo 3M serial connection")
+            self.ctvideo_port.setText(connected_port)
+            if camera_error is not None:
                 self.log(
                     f"Camera mapping failed ({camera_error}); "
                     "starting automatic OpenCV source recovery."
@@ -557,14 +577,20 @@ class HeatingControlPanel(QWidget):
                 camera["CameraIndex"], camera["CameraName"], camera_info=camera
             ):
                 raise RuntimeError("The CTvideo camera thread did not start.")
-            self.log(f"CTvideo 3M connected: {port}")
+            self.log(f"CTvideo 3M connected: {connected_port}")
             self._notify_main()
-        except Exception as error:
+
+        def failed(error):
             self.video_view.stop_preview()
-            if created_device:
+            if "CTVIDEO3M" in self.owned_devices:
                 self.manager.remove_device("CTVIDEO3M")
                 self.owned_devices.discard("CTVIDEO3M")
             self.show_error("CTvideo 3M", error)
+
+        run_busy_task(
+            self, connect, connected, failed,
+            key="ctvideo_connection",
+        )
 
     def disconnect_ctvideo(self):
         if self.control_active:

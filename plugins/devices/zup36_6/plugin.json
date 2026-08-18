@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "api_version": "1",
+  "type": "device",
+  "profile": "standard",
+  "id": "zup36_6",
+  "name": "Zup36 6",
+  "version": "0.1.0",
+  "entrypoint": "plugin.py:plugin",
+  "enabled": true,
+  "resources": [
+    {
+      "id": "primary",
+      "roles": [
+        "measurement",
+        "control"
+      ],
+      "thread": "device_worker"
+    }
+  ],
+  "permissions": []
+}

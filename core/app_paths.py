@@ -17,3 +17,9 @@ def storage_dir(name: str) -> Path:
     path = application_dir() / name
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def resource_path(relative_path: str | Path) -> Path:
+    """Return a bundled read-only resource in source and frozen builds."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return root / relative_path

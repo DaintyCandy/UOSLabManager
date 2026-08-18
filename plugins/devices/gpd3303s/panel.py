@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .driver import GPD3303S
+from gui.widget_busy_spinner import run_busy_task
 
 
 class GPD3303SPanel(QWidget):
@@ -162,30 +163,71 @@ class GPD3303SPanel(QWidget):
                 device.close()
                 raise
 
-        try:
-            self.manager.add_device(
-                self.plugin.device_id,
-                create_identified_device,
-            )
+        def connected(values):
+            self._apply_device_settings(values)
             self.log("Connected")
             self.monitor_timer.start()
             self.sync_connection_status()
-            self.read_device()
-        except Exception as error:
+
+        def failed(error):
+            if self.get_device() is not None:
+                run_busy_task(
+                    self,
+                    lambda: self.manager.remove_device(self.plugin.device_id),
+                    lambda _result: self.sync_connection_status(),
+                    lambda cleanup_error: self.log(str(cleanup_error)),
+                    key="connection_cleanup",
+                )
             self.show_error(error)
+
+        run_busy_task(
+            self,
+            lambda: self._connect_and_read(create_identified_device),
+            connected,
+            failed,
+            key="connection",
+        )
+
+    def _connect_and_read(self, device_factory):
+        self.manager.add_device(self.plugin.device_id, device_factory)
+        try:
+            return self.get_device().read_settings()
+        except Exception:
+            self.manager.remove_device(self.plugin.device_id)
+            raise
 
     def disconnect_device(self):
         self._cancel_off_confirmation()
         device = self.get_device()
-        if device is not None and self.output_off_on_close.isChecked():
+        if device is None:
+            return
+        output_off = self.output_off_on_close.isChecked()
+
+        def disconnect():
+            error = None
             try:
-                device.output_off()
-            except Exception:
-                pass
-        self.manager.remove_device(self.plugin.device_id)
-        self.monitor_timer.stop()
-        self.log("Disconnected")
-        self.sync_connection_status()
+                if output_off:
+                    device.output_off()
+            except Exception as caught:
+                error = caught
+            finally:
+                self.manager.remove_device(self.plugin.device_id)
+            if error is not None:
+                raise error
+
+        def disconnected(_result):
+            self.monitor_timer.stop()
+            self.log("Disconnected")
+            self.sync_connection_status()
+
+        def failed(error):
+            disconnected(None)
+            self.show_error(error)
+
+        run_busy_task(
+            self, disconnect, disconnected, failed,
+            key="connection",
+        )
 
     def _format_monitor_value(self, value):
         try:
@@ -241,32 +283,41 @@ class GPD3303SPanel(QWidget):
             )
         except Exception as error:
             self.show_error(error)
-            self.manager.remove_device(self.plugin.device_id)
             self.monitor_timer.stop()
-            self.sync_connection_status()
+            run_busy_task(
+                self,
+                lambda: self.manager.remove_device(self.plugin.device_id),
+                lambda _result: self.sync_connection_status(),
+                lambda remove_error: self.log(str(remove_error)),
+                key="connection_lost",
+            )
 
     def read_device(self):
         device = self.get_device()
         if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            values = device.read_settings()
-            self.ch1_voltage.setValue(values.get("CH1_voltage_setpoint", 0.0))
-            self.ch1_current.setValue(values.get("CH1_current_setpoint", 0.0))
-            self.ch2_voltage.setValue(values.get("CH2_voltage_setpoint", 0.0))
-            self.ch2_current.setValue(values.get("CH2_current_setpoint", 0.0))
-            self.output_enabled.blockSignals(True)
-            self.output_enabled.setChecked(values.get("output_on", False))
-            self.output_enabled.blockSignals(False)
-            self.log("Device settings read")
-        except Exception as error:
-            self.show_error(error)
+        run_busy_task(
+            self,
+            device.read_settings,
+            lambda values: (
+                self._apply_device_settings(values),
+                self.log("Device settings read"),
+            ),
+            self.show_error,
+            key="device_action",
+        )
 
-    def _apply_channel_settings(self, channel: str):
-        device = self.get_device()
-        if device is None:
-            raise RuntimeError("Connect the device first.")
+    def _apply_device_settings(self, values):
+        self.ch1_voltage.setValue(values.get("CH1_voltage_setpoint", 0.0))
+        self.ch1_current.setValue(values.get("CH1_current_setpoint", 0.0))
+        self.ch2_voltage.setValue(values.get("CH2_voltage_setpoint", 0.0))
+        self.ch2_current.setValue(values.get("CH2_current_setpoint", 0.0))
+        self.output_enabled.blockSignals(True)
+        self.output_enabled.setChecked(values.get("output_on", False))
+        self.output_enabled.blockSignals(False)
+
+    def _channel_settings(self, channel: str):
         if channel == "CH1":
             voltage = self.ch1_voltage.value()
             current = self.ch1_current.value()
@@ -275,15 +326,31 @@ class GPD3303SPanel(QWidget):
             current = self.ch2_current.value()
         if voltage > GPD3303S.MAX_VOLTAGE or current > GPD3303S.MAX_CURRENT:
             raise ValueError("Channel setting exceeds device limits")
+        return voltage, current
+
+    @staticmethod
+    def _write_channel_settings(device, channel, voltage, current):
         device.set_channel_current(channel, current)
         device.set_channel_voltage(channel, voltage)
-        self.log(f"{channel} settings applied")
 
     def apply_channel_settings(self, channel: str):
         try:
-            self._apply_channel_settings(channel)
+            device = self.get_device()
+            if device is None:
+                raise RuntimeError("Connect the device first.")
+            voltage, current = self._channel_settings(channel)
         except Exception as error:
             self.show_error(error)
+            return
+        run_busy_task(
+            self,
+            lambda: self._write_channel_settings(
+                device, channel, voltage, current
+            ),
+            lambda _result: self.log(f"{channel} settings applied"),
+            self.show_error,
+            key="device_action",
+        )
 
     def apply_settings(self):
         device = self.get_device()
@@ -291,41 +358,63 @@ class GPD3303SPanel(QWidget):
             self.show_error("Connect the device first.")
             return
         try:
-            requested_output_on = self.output_enabled.isChecked()
-
-            # Always establish a known-safe OFF state before changing limits.
-            device.output_off()
-            self._apply_channel_settings("CH1")
-            self._apply_channel_settings("CH2")
-
-            if requested_output_on:
-                answer = QMessageBox.question(
-                    self,
-                    "Confirm GPD-3303S Output",
-                    (
-                        "Enable the GPD-3303S outputs with these settings?\n\n"
-                        f"CH1: {self.ch1_voltage.value():.3f} V / "
-                        f"{self.ch1_current.value():.3f} A\n"
-                        f"CH2: {self.ch2_voltage.value():.3f} V / "
-                        f"{self.ch2_current.value():.3f} A\n\n"
-                        "OUT1 is global. CH3 may also become active."
-                    ),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if answer != QMessageBox.StandardButton.Yes:
-                    self.output_enabled.setChecked(False)
-                    self.log("Output enable cancelled; output remains OFF")
-                    return
-                device.output_on()
-            self.log("Settings applied")
+            ch1 = self._channel_settings("CH1")
+            ch2 = self._channel_settings("CH2")
         except Exception as error:
-            self.output_enabled.setChecked(False)
+            self.show_error(error)
+            return
+        requested_output_on = self.output_enabled.isChecked()
+        if requested_output_on:
+            answer = QMessageBox.question(
+                self,
+                "Confirm GPD-3303S Output",
+                (
+                    "Enable the GPD-3303S outputs with these settings?\n\n"
+                    f"CH1: {ch1[0]:.3f} V / {ch1[1]:.3f} A\n"
+                    f"CH2: {ch2[0]:.3f} V / {ch2[1]:.3f} A\n\n"
+                    "OUT1 is global. CH3 may also become active."
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.output_enabled.setChecked(False)
+                run_busy_task(
+                    self,
+                    device.output_off,
+                    lambda _result: self.log(
+                        "Output enable cancelled; output remains OFF"
+                    ),
+                    self.show_error,
+                    key="device_action",
+                )
+                return
+
+        def apply():
             try:
                 device.output_off()
+                self._write_channel_settings(device, "CH1", *ch1)
+                self._write_channel_settings(device, "CH2", *ch2)
+                if requested_output_on:
+                    device.output_on()
             except Exception:
-                pass
+                try:
+                    device.output_off()
+                except Exception:
+                    pass
+                raise
+
+        def failed(error):
+            self.output_enabled.setChecked(False)
             self.show_error(error)
+
+        run_busy_task(
+            self,
+            apply,
+            lambda _result: self.log("Settings applied"),
+            failed,
+            key="device_action",
+        )
 
     def reset_settings(self):
         self.ch1_voltage.setValue(0)
@@ -351,18 +440,22 @@ class GPD3303SPanel(QWidget):
         if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            device.output_off()
+        def completed(_result):
             self.output_enabled.blockSignals(True)
             self.output_enabled.setChecked(False)
             self.output_enabled.blockSignals(False)
             self._start_off_confirmation()
             self.log("Emergency OUT0 sent")
-        except Exception as error:
+        def failed(error):
             self._cancel_off_confirmation()
             self.output_status.setText("OUT0 전송 실패")
             self.output_status.setStyleSheet("color:red; font-weight:bold;")
             self.show_error(error)
+
+        run_busy_task(
+            self, device.output_off, completed, failed,
+            key="emergency_off",
+        )
 
     def handle_output_toggle(self, enabled: bool):
         if enabled:

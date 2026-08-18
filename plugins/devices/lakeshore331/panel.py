@@ -5,7 +5,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pyqtgraph as pg
-from PyQt6.QtCore import QSettings, QThread, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
@@ -14,40 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .driver import LakeShore331
-from gui.widget_busy_spinner import BusySpinnerDialog
-
-
-class CurveHeaderLoadWorker(QThread):
-    loaded = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, device, curve, parent=None):
-        super().__init__(parent)
-        self.device = device
-        self.curve = curve
-
-    def run(self):
-        try:
-            header = self.device.get_curve_header(self.curve)
-            points = self.device.get_curve_points(self.curve)
-            self.loaded.emit((header, points))
-        except Exception as error:
-            self.failed.emit(str(error))
-
-
-class DeviceActionWorker(QThread):
-    completed = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, action, parent=None):
-        super().__init__(parent)
-        self.action = action
-
-    def run(self):
-        try:
-            self.completed.emit(self.action())
-        except Exception as error:
-            self.failed.emit(str(error))
+from gui.widget_busy_spinner import run_busy_task
 
 
 class LakeShore331Window(QWidget):
@@ -84,8 +51,6 @@ class LakeShore331Window(QWidget):
         self.settings = QSettings("UOSLabManager", "UOSLabManager")
         self.port_input = QLineEdit("COM3")
         self.port_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.action_worker = None
-        self.action_spinner = None
         self.snapshot = None
         self.curve_points = {}
         self.input_history = {
@@ -661,16 +626,15 @@ class LakeShore331Window(QWidget):
         if device is None:
             self.show_error("Connect the device first.")
             return
-        if getattr(self, "curve_load_worker", None) is not None:
-            return
         curve = self.curve_number.currentData()
-        self.curve_loading_dialog = BusySpinnerDialog(self)
-        self.curve_loading_dialog.show()
-        self.curve_load_worker = CurveHeaderLoadWorker(device, curve, self)
-        self.curve_load_worker.loaded.connect(self.curve_loading_completed)
-        self.curve_load_worker.failed.connect(self.curve_loading_failed)
-        self.curve_load_worker.finished.connect(self.curve_loading_finished)
-        self.curve_load_worker.start()
+        self._start_device_action(
+            lambda: (
+                device.get_curve_header(curve),
+                device.get_curve_points(curve),
+            ),
+            self.curve_loading_completed,
+            key="device_action",
+        )
 
     def curve_loading_completed(self, result):
         header, points = result
@@ -682,71 +646,65 @@ class LakeShore331Window(QWidget):
         self.curve_coefficient.setCurrentIndex(max(0, self.curve_coefficient.findData(coefficient)))
         self.curve_points = {index: point for index, point in enumerate(points, start=1)}
         self.update_curve_preview()
-        self.close_curve_loading_dialog()
         self.log(f"Curve header and {len(points)} points read")
 
-    def curve_loading_failed(self, message):
-        self.close_curve_loading_dialog()
-        self.show_error(message)
-
-    def curve_loading_finished(self):
-        worker = self.curve_load_worker
-        self.curve_load_worker = None
-        if worker is not None:
-            worker.deleteLater()
-
-    def close_curve_loading_dialog(self):
-        dialog = getattr(self, "curve_loading_dialog", None)
-        if dialog is not None:
-            dialog.close()
-            dialog.deleteLater()
-            self.curve_loading_dialog = None
-
     def write_curve_header(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            self.get_device().set_curve_header(
-                self.curve_number.currentData(), self.curve_name.text(), self.curve_serial.text(),
-                self.curve_format.currentData(), self.curve_limit.value(), self.curve_coefficient.currentData(),
-            )
-            self.log("Curve header written")
-        except Exception as error:
-            self.show_error(error)
+        payload = (
+            self.curve_number.currentData(), self.curve_name.text(),
+            self.curve_serial.text(), self.curve_format.currentData(),
+            self.curve_limit.value(), self.curve_coefficient.currentData(),
+        )
+        self._start_device_action(
+            lambda: device.set_curve_header(*payload),
+            lambda _result: self.log("Curve header written"),
+            key="device_action",
+        )
 
     def read_curve_point(self):
         if self.get_device() is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            sensor_value, temperature = self.get_device().get_curve_point(
-                self.curve_number.currentData(), self.curve_point_index.value()
-            )
+        device = self.get_device()
+        curve = self.curve_number.currentData()
+        point_index = self.curve_point_index.value()
+
+        def completed(result):
+            sensor_value, temperature = result
             self.curve_sensor_value.setValue(sensor_value)
             self.curve_temperature.setValue(temperature)
-            self.curve_points[self.curve_point_index.value()] = (sensor_value, temperature)
+            self.curve_points[point_index] = (sensor_value, temperature)
             self.update_curve_preview()
             self.log("Curve point read")
-        except Exception as error:
-            self.show_error(error)
+
+        self._start_device_action(
+            lambda: device.get_curve_point(curve, point_index),
+            completed,
+            key="device_action",
+        )
 
     def write_curve_point(self):
         if self.get_device() is None:
             self.show_error("Connect the device first.")
             return
-        try:
-            self.get_device().set_curve_point(
-                self.curve_number.currentData(), self.curve_point_index.value(),
-                self.curve_sensor_value.value(), self.curve_temperature.value(),
-            )
-            self.curve_points[self.curve_point_index.value()] = (
-                self.curve_sensor_value.value(), self.curve_temperature.value()
-            )
+        device = self.get_device()
+        curve = self.curve_number.currentData()
+        point_index = self.curve_point_index.value()
+        point = (self.curve_sensor_value.value(), self.curve_temperature.value())
+
+        def completed(_result):
+            self.curve_points[point_index] = point
             self.update_curve_preview()
             self.log("Curve point written")
-        except Exception as error:
-            self.show_error(error)
+
+        self._start_device_action(
+            lambda: device.set_curve_point(curve, point_index, *point),
+            completed,
+            key="device_action",
+        )
 
     def import_curve_csv(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import Curve CSV", str(Path.cwd()), "CSV Files (*.csv)")
@@ -777,7 +735,8 @@ class LakeShore331Window(QWidget):
         self.log(f"Imported {len(points)} curve points: {path}")
 
     def apply_curve_csv(self):
-        if self.get_device() is None:
+        device = self.get_device()
+        if device is None:
             self.show_error("Connect the device first.")
             return
         if not self.curve_points:
@@ -790,12 +749,21 @@ class LakeShore331Window(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            for index, (sensor_value, temperature) in sorted(self.curve_points.items()):
-                self.get_device().set_curve_point(curve, index, sensor_value, temperature)
-            self.log(f"Applied {len(self.curve_points)} CSV points to user curve {curve}")
-        except Exception as error:
-            self.show_error(error)
+        points = tuple(sorted(self.curve_points.items()))
+
+        def apply_points():
+            for index, (sensor_value, temperature) in points:
+                device.set_curve_point(
+                    curve, index, sensor_value, temperature
+                )
+
+        self._start_device_action(
+            apply_points,
+            lambda _result: self.log(
+                f"Applied {len(points)} CSV points to user curve {curve}"
+            ),
+            key="device_action",
+        )
 
     def clear_curve_preview(self):
         self.curve_points.clear()
@@ -818,11 +786,13 @@ class LakeShore331Window(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        try:
-            self.get_device().delete_curve(self.curve_number.currentData())
-            self.log("User curve deleted")
-        except Exception as error:
-            self.show_error(error)
+        device = self.get_device()
+        curve = self.curve_number.currentData()
+        self._start_device_action(
+            lambda: device.delete_curve(curve),
+            lambda _result: self.log("User curve deleted"),
+            key="device_action",
+        )
 
     def _build_safety_tab(self):
         panel = QWidget()
@@ -839,41 +809,16 @@ class LakeShore331Window(QWidget):
     def get_device(self):
         return self.manager.get_device("LS331")
 
-    def _start_device_action(self, action, success, failure=None):
-        if self.action_worker is not None:
-            return
-        self.action_spinner = BusySpinnerDialog(self)
-        self.action_spinner.show()
-        self.action_worker = DeviceActionWorker(action, self)
-        self._action_success = success
-        self._action_failure = failure
-        self.action_worker.completed.connect(self._device_action_completed)
-        self.action_worker.failed.connect(self._device_action_failed)
-        self.action_worker.finished.connect(self._device_action_finished)
-        self.action_worker.start()
-
-    def _close_action_spinner(self):
-        if self.action_spinner is not None:
-            self.action_spinner.close()
-            self.action_spinner.deleteLater()
-            self.action_spinner = None
-
-    def _device_action_completed(self, result):
-        self._close_action_spinner()
-        self._action_success(result)
-
-    def _device_action_failed(self, message):
-        self._close_action_spinner()
-        if self._action_failure is not None:
-            self._action_failure(message)
-        else:
-            self.show_error(message)
-
-    def _device_action_finished(self):
-        worker = self.action_worker
-        self.action_worker = None
-        if worker is not None:
-            worker.deleteLater()
+    def _start_device_action(
+        self, action, success, failure=None, *, key="device_action"
+    ):
+        return run_busy_task(
+            self,
+            action,
+            success,
+            failure or self.show_error,
+            key=key,
+        )
 
     def toggle_connection(self):
         if self.get_device() is None:
@@ -909,20 +854,47 @@ class LakeShore331Window(QWidget):
         self._notify_main()
 
     def _connect_failed(self, message):
-        self.manager.remove_device("LS331")
+        if self.get_device() is not None:
+            self._start_device_action(
+                lambda: self.manager.remove_device("LS331"),
+                lambda _result: self.sync_connection_status(),
+                lambda cleanup_error: self.log(str(cleanup_error)),
+                key="connection_cleanup",
+            )
         self.sync_connection_status()
         self.show_error(message)
 
     def disconnect_device(self):
         self.tracking_timer.stop()
         device = self.get_device()
-        try:
-            if device and self.heater_off_disconnect.isChecked():
-                device.heater_off()
-        finally:
-            self.manager.remove_device("LS331")
-        self.log("Disconnected")
-        self._notify_main()
+        if device is None:
+            return
+        heater_off = self.heater_off_disconnect.isChecked()
+
+        def disconnect():
+            error = None
+            try:
+                if heater_off:
+                    device.heater_off()
+            except Exception as caught:
+                error = caught
+            finally:
+                self.manager.remove_device("LS331")
+            if error is not None:
+                raise error
+
+        def disconnected(_result):
+            self.log("Disconnected")
+            self._notify_main()
+
+        def failed(error):
+            disconnected(None)
+            self.show_error(error)
+
+        self._start_device_action(
+            disconnect, disconnected, failed,
+            key="connection",
+        )
 
     def read_device(self):
         device = self.get_device()
@@ -1046,11 +1018,20 @@ class LakeShore331Window(QWidget):
             self.update_realtime_status()
         except Exception as error:
             self.tracking_timer.stop()
-            self.manager.remove_device("LS331")
-            self.sync_connection_status()
-            self.log(f"Connection lost; changed to Disconnected: {error}")
-            if self.main_window:
-                self.main_window.update_device_status()
+            message = f"Connection lost; changed to Disconnected: {error}"
+
+            def removed(_result):
+                self.sync_connection_status()
+                self.log(message)
+                if self.main_window:
+                    self.main_window.update_device_status()
+
+            self._start_device_action(
+                lambda: self.manager.remove_device("LS331"),
+                removed,
+                lambda remove_error: self.log(str(remove_error)),
+                key="connection_lost",
+            )
 
     def resume_input_tracking(self):
         if self.get_device() is not None and not self.tracking_timer.isActive():

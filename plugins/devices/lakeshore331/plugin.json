@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "api_version": "1",
+  "type": "device",
+  "profile": "standard",
+  "id": "LS331",
+  "name": "Lake Shore 331",
+  "version": "1.0.0",
+  "entrypoint": "plugin.py:plugin",
+  "enabled": true
+}

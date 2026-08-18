@@ -690,8 +690,11 @@ class CTVideoView(QWidget):
                 last_view = session["views"] == {self}
                 if last_view:
                     worker.requestInterruption()
-                    if not worker.wait(4000):
-                        self.status.setText("Video thread: waiting for camera to stop")
+                    if worker.isRunning():
+                        self._disconnect_worker(worker, keep_finished=True)
+                        self.preview.clear()
+                        self.preview.setText("CTvideo 3M\nVIDEO STOPPING")
+                        self.status.setText("Video thread: stopping")
                         return False
                 self._disconnect_worker(worker)
                 session["views"].discard(self)
@@ -706,16 +709,18 @@ class CTVideoView(QWidget):
         self.status.setText("Video thread: stopped")
         return True
 
-    def _disconnect_worker(self, worker):
-        for signal, callback in (
+    def _disconnect_worker(self, worker, *, keep_finished=False):
+        callbacks = [
             (worker.frame_ready, self.update_frame),
             (worker.video_error, self.handle_error),
             (worker.camera_properties, self.forward_camera_properties),
             (worker.source_status, self.handle_source_status),
             (worker.source_opened, self.handle_source_opened),
             (worker.hardware_status, self.handle_hardware_status),
-            (worker.finished, self.worker_finished),
-        ):
+        ]
+        if not keep_finished:
+            callbacks.append((worker.finished, self.worker_finished))
+        for signal, callback in callbacks:
             try:
                 signal.disconnect(callback)
             except (TypeError, RuntimeError):
@@ -754,3 +759,6 @@ class CTVideoView(QWidget):
                     self._sessions.pop(key, None)
             self.worker = None
             self._session_key = None
+            self.preview.clear()
+            self.preview.setText("CTvideo 3M\nVIDEO STANDBY")
+            self.status.setText("Video thread: stopped")

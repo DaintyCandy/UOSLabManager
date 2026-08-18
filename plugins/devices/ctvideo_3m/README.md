@@ -6,7 +6,11 @@ The plug-in separates the pyrometer protocol, camera path, and user interface.
 
 - `plugin.py`: device plug-in metadata and connection entry point.
 - `connection.py`: selects the platform transport and creates `CTVideo3M`.
-- `panel.py`: the actual CTvideo settings and monitoring panel.
+- `panel.py`: panel layout, connection lifecycle, monitoring, and profiles.
+- `panel_video.py`: software display controls and confirmed persistent camera
+  control actions.
+- `panel_calibration.py`: isolated calibration snapshot, confirmation, write,
+  and verification workflow.
 
 ## Pyrometer communication
 

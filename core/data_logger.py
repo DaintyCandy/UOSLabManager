@@ -11,7 +11,7 @@ class DataLogger:
         self.rows = deque(maxlen=self.max_rows)
 
     def append(self, row):
-        self.rows.append(row)
+        self.rows.append(dict(row))
 
     def set_max_rows(self, max_rows):
         """Resize the buffer while retaining its newest rows."""
