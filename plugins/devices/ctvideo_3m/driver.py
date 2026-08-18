@@ -9,7 +9,10 @@ import threading
 import time
 from typing import Mapping
 
-import serial
+try:
+    import serial
+except ImportError:  # Keep the plug-in UI available so it can explain the fix.
+    serial = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,12 @@ class CTVideo3M:
         keeps the CTvideo command protocol independent from the platform USB
         transport; macOS supplies a D2XX adapter through ``connection.py``.
         """
+        if transport is None and serial is None:
+            raise RuntimeError(
+                "CTvideo serial support is unavailable because pyserial is not "
+                "installed in the Python environment running UOSLabManager. "
+                "Install it with: python -m pip install pyserial"
+            )
         self.ser = transport if transport is not None else serial.Serial(
             port=port,
             baudrate=115200,

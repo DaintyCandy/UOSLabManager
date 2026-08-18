@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 
 import pyqtgraph as pg
@@ -25,7 +26,16 @@ class HeatingPIDWorker(QThread):
         super().__init__(parent)
         self.manager = manager
         self.config = dict(config)
+        self._config_lock = threading.RLock()
         self._last_temperature_update = None
+
+    def set_target_temperature(self, value):
+        with self._config_lock:
+            self.config["target_temperature"] = float(value)
+
+    def get_target_temperature(self):
+        with self._config_lock:
+            return float(self.config["target_temperature"])
 
     def _safe_output(self, device):
         errors = []
@@ -148,7 +158,7 @@ class HeatingPIDWorker(QThread):
                                 + 0.2 * observed_resistance
                             )
 
-                    error = config["target_temperature"] - temperature
+                    error = self.get_target_temperature() - temperature
                     derivative = 0.0
                     if previous_temperature is not None:
                         derivative = -(
@@ -383,8 +393,18 @@ class HeatingControlPanel(QWidget):
         target_group = QGroupBox("Temperature Target")
         target_form = QFormLayout(target_group)
         self.target_temperature = self._spin(-50.0, 2000.0, 300.0, 1, " °C")
+        self.target_temperature.editingFinished.connect(
+            self.apply_running_setpoint
+        )
+        self.apply_setpoint_button = QPushButton("Apply Setpoint")
+        self.apply_setpoint_button.clicked.connect(
+            lambda _checked=False: self.apply_running_setpoint()
+        )
         self.max_temperature = self._spin(-50.0, 2000.0, 500.0, 1, " °C")
-        target_form.addRow("Target temperature", self.target_temperature)
+        target_row = QHBoxLayout()
+        target_row.addWidget(self.target_temperature, 1)
+        target_row.addWidget(self.apply_setpoint_button)
+        target_form.addRow("Target temperature (live)", target_row)
         target_form.addRow("Safety temperature", self.max_temperature)
 
         ramp_group = QGroupBox("Current Ramp")
@@ -430,7 +450,7 @@ class HeatingControlPanel(QWidget):
         )
         self.control_button.clicked.connect(self.toggle_control)
         self.control_setting_widgets = (
-            self.target_temperature, self.max_temperature,
+            self.max_temperature,
             self.current_ramp_enabled, self.current_ramp_rate,
             self.pid_p, self.pid_i, self.pid_d,
             self.control_voltage_limit, self.control_current_limit,
@@ -615,7 +635,7 @@ class HeatingControlPanel(QWidget):
             self.control_safety_reason = ""
             self.target_temperature.setValue(target)
             if self.control_active and self.control_worker is not None:
-                self.control_worker.config["target_temperature"] = target
+                self.control_worker.set_target_temperature(target)
                 self.log(f"Sequence changed target to {target:.1f} °C")
             else:
                 self.start_control()
@@ -637,7 +657,12 @@ class HeatingControlPanel(QWidget):
         if not self.control_active:
             raise RuntimeError("Heating control stopped before reaching the setpoint")
         temperature = self.manager.get_latest("CTVIDEO3M").get("actual_temp_C")
-        return temperature is not None and abs(float(temperature) - float(value)) <= 2.5
+        target = (
+            self.control_worker.get_target_temperature()
+            if self.control_worker is not None
+            else self.target_temperature.value()
+        )
+        return temperature is not None and abs(float(temperature) - target) <= 2.5
 
     def cancel_sequence_command(self):
         if self.control_active:
@@ -648,6 +673,25 @@ class HeatingControlPanel(QWidget):
             self.stop_control()
         else:
             self.start_control()
+
+    def apply_running_setpoint(self):
+        worker = self.control_worker
+        if not self.control_active or worker is None:
+            return
+        target = self.target_temperature.value()
+        if target > self.max_temperature.value():
+            previous = worker.get_target_temperature()
+            self.target_temperature.setValue(previous)
+            self.show_error(
+                "Heating Control",
+                "Target temperature exceeds the safety temperature.",
+            )
+            return
+        previous = worker.get_target_temperature()
+        if math.isclose(target, previous, rel_tol=0.0, abs_tol=1e-9):
+            return
+        worker.set_target_temperature(target)
+        self.log(f"Running setpoint changed to {target:.1f} °C")
 
     def start_control(self):
         zup = self.manager.get_device("ZUP")

@@ -489,6 +489,10 @@ def _migrate_legacy_bundled_plugins(source: Path, destination: Path) -> None:
     """Replace known incompatible bundled defaults while preserving a backup."""
     migrations = (
         (
+            Path("devices/ctvideo_3m/panel.py"),
+            "from gui.panel_ctvideo import CTVideoView",
+        ),
+        (
             Path("experiments/heating_control/panel.py"),
             "from gui.panel_ctvideo import CTVideoView",
         ),

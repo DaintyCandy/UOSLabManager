@@ -1,5 +1,3 @@
-import time
-
 from core.plugin_manager import DataColumn, DevicePlugin, SequenceCommand
 
 
@@ -76,16 +74,9 @@ class LakeShore331Plugin(DevicePlugin):
 
     def connect(self, connection: str):
         from .driver import LakeShore331
-        device = LakeShore331(connection)
-        try:
-            time.sleep(0.2)
-            device.write("MODE 1")
-            time.sleep(0.2)
-            device.write("RAMP 1,0,1.0")
-            return device
-        except Exception:
-            device.close()
-            raise
+        # Opening a connection must not change the controller's mode, ramp,
+        # setpoint, heater range, or any other persisted device setting.
+        return LakeShore331(connection)
 
 
 plugin = LakeShore331Plugin()

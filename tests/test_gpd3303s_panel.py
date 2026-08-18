@@ -59,8 +59,8 @@ class TestGPD3303SPanel(unittest.TestCase):
     def tearDown(self):
         self.panel.close()
 
-    def test_out0_on_connect_is_checked_by_default(self):
-        self.assertTrue(self.panel.output_off_on_connect.isChecked())
+    def test_out0_on_connect_is_disabled_by_default(self):
+        self.assertFalse(self.panel.output_off_on_connect.isChecked())
 
     def test_channel_settings_apply_current_before_voltage(self):
         voltage, current = self.panel._channel_settings("CH1")
@@ -72,7 +72,11 @@ class TestGPD3303SPanel(unittest.TestCase):
             [call.set_channel_current("CH1", 0.05), call.set_channel_voltage("CH1", 1.0)],
         )
 
-    def test_partial_setting_failure_never_sends_out1(self):
+    @patch(
+        "plugins.devices.gpd3303s.panel.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.Yes,
+    )
+    def test_partial_setting_failure_never_sends_out1(self, _question):
         self.panel.output_enabled.setChecked(True)
         self.device.set_channel_current.side_effect = RuntimeError("write failed")
 

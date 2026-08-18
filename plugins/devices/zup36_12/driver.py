@@ -50,9 +50,8 @@ class ZUP36_12:
             self.model = self.identify()
         except (TimeoutError, serial.SerialException) as error:
             self.identification_error = str(error)
-        self.write(":RMT1;")
-        self.write(":AST0;")
-        self.write(":OUT0;")
+        # Connection is observational: preserve remote/local mode,
+        # auto-restart, output state, and programmed voltage/current.
 
     def close(self):
         if self.ser and self.ser.is_open:
