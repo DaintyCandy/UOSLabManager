@@ -1,4 +1,8 @@
-from core.plugin_manager import DataColumn, DevicePlugin, SequenceCommand
+import math
+
+from core.plugin_manager import (
+    DataColumn, DevicePlugin, RecipeMigration, SafeAction, SequenceCommand,
+)
 
 
 def create_settings_window(manager, parent):
@@ -38,6 +42,15 @@ def disable_ramp(device, _value, context):
     context.set_runtime("LS331.ramp_active", False)
 
 
+def legacy_wait_minutes(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("legacy LS331 wait time must be numeric")
+    minutes = float(value)
+    if not math.isfinite(minutes) or minutes < 0:
+        raise ValueError("legacy LS331 wait time must be finite and non-negative")
+    return minutes * 60.0
+
+
 class LakeShore331Plugin(DevicePlugin):
     device_id = "LS331"
     display_name = "LS331"
@@ -45,11 +58,24 @@ class LakeShore331Plugin(DevicePlugin):
     connection_label = "Port"
     default_connection = "/dev/cu.usbserial-A9EQ7W68"
     columns = (
-        DataColumn("A_temp_K", "LS331_A_K"),
-        DataColumn("B_temp_K", "LS331_B_K"),
+        DataColumn(
+            "A_temp_K", "LS331_A_K", unit="K",
+            condition_label="LS331 Temperature A",
+        ),
+        DataColumn(
+            "B_temp_K", "LS331_B_K", unit="K",
+            condition_label="LS331 Temperature B",
+        ),
         DataColumn("setpoint_K", "LS331_setpoint_K"),
     )
+    safe_actions = (SafeAction("heater_off"),)
     settings_factory = staticmethod(create_settings_window)
+    recipe_migrations = (
+        RecipeMigration(
+            command="Wait Time", target_device="SYSTEM",
+            target_command="Wait Time", transform=legacy_wait_minutes,
+        ),
+    )
     sequence_commands = (
         SequenceCommand(
             key="Set Temp", label="Set Temp", unit="K", minimum=0.0,

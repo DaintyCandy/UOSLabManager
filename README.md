@@ -17,34 +17,8 @@ UOSLabManager는 실험 장비마다 흩어진 제어 프로그램과 기록 방
 - **GUI와 분리된 시퀀스 엔진** — Qt에 의존하지 않는 `SequenceEngine`이 recipe 검증과 실행을 담당합니다. 장비 플러그인이 명령의 단위, 범위, 선택지와 실행 함수를 선언합니다.
 - **측정 데이터 출처 추적** — atomic snapshot에 sample ID, UTC 취득 시각, 응답 시간, 데이터 age와 freshness를 함께 기록합니다. 같은 cached sample의 중복 저장을 줄이면서 stale·연결 상태 변화는 보존합니다.
 - **실시간 데이터 작업 공간** — 선택 가능한 그래프, 표, 로그, CSV 기록과 sequence marker를 한곳에서 관리합니다.
-- **복합 장비 지원** — CTvideo처럼 pyrometer, USB camera, calibration, display control을 함께 다루는 장비는 `composite` profile과 전용 패널을 사용할 수 있습니다.
 - **Plugin Studio와 Codex 연동** — 플러그인 생성·편집·검증·가져오기·내보내기·reload를 지원하며, Codex가 만든 변경은 staging 영역에서 검토한 뒤 적용하거나 폐기할 수 있습니다.
 - **안전 동작** — 상단의 `STOP`으로 실험을 중지하고 연결된 출력 장비의 안전 종료를 시도합니다. 위험한 calibration·출력 변경에는 확인 절차가 포함됩니다.
-- **지연형 로딩 표시** — 짧은 작업에는 불필요한 화면 전환을 만들지 않고, 작업이 길어질 때만 글자 없는 로딩 애니메이션을 표시합니다.
-
-## 기본 제공 플러그인
-
-### 장비
-
-| 장비 ID | 표시 이름 | Profile | 주요 기능 |
-| --- | --- | --- | --- |
-| `K2400` | Keithley 2400 | Standard | GPIB/VISA 연결, source 설정, 측정, sequence 명령 |
-| `GPD3303S` | GPD-3303S | Standard | Serial 전원공급기 제어와 채널 측정 |
-| `ZUP` | ZUP36-12 | Standard | 전압·전류 설정, 출력 제어, 상태 측정, sequence 명령 |
-| `LS331` | Lake Shore 331 | Standard | 온도·heater 측정, setpoint와 heater 제어, calibration curve 관리 |
-| `CTVIDEO3M` | CTvideo 3M | Composite | Pyrometer, USB video, display 설정, calibration, 플랫폼별 장치 탐색 |
-
-`plugins/devices/zup36_6`은 Plugin Studio에서 생성한 standard-device 확장 예시도 함께 제공합니다. 실제 장비에 사용하기 전에는 driver와 안전 범위를 장비 사양에 맞게 구현하고 검증해야 합니다.
-
-### 실험
-
-| 플러그인 ID | 기능 |
-| --- | --- |
-| `heating_control` | ZUP36-12와 CTvideo 3M을 결합한 가열 제어 workspace |
-| `line_profile` | 카메라 영상의 live line profile, animation, kymograph 분석 |
-| `thermo` | 사용자 실험 패널 scaffold |
-
-장비명은 호환 대상을 식별하기 위한 용도이며, 본 프로젝트는 해당 제조사와 제휴하거나 제조사의 보증을 받지 않습니다.
 
 ## 설치 및 실행
 
@@ -80,48 +54,6 @@ python main.py
 
 장비 통신은 실제 하드웨어 출력에 영향을 줄 수 있습니다. 처음 사용하는 플러그인은 출력이 없는 상태에서 연결·읽기·중지 동작을 먼저 검증하세요.
 
-## 동작 구조
-
-```text
-PyQt6 GUI
-├─ Dashboard / Device panels / Experiment panels
-├─ Data / Sequence / Camera / Plugin Studio
-│
-├─ DeviceManager ── DeviceWorker-<device_id> (장비별 전용 thread)
-├─ MeasurementPipeline ── atomic snapshot / freshness / CSV
-├─ SequenceEngine ── GUI 독립 recipe 검증·실행
-└─ PluginManager
-   ├─ plugins/devices/<id>       장비 플러그인
-   └─ plugins/experiments/<id>   실험 플러그인
-```
-
-### 장비 스레드
-
-장비를 연결하면 `DeviceManager`가 장비별 `DeviceWorker-<device_id>`를 생성합니다. driver 생성, 주기 측정, panel과 sequence에서 요청한 명령, disconnect가 이 worker에서 직렬화되므로 GUI thread에서 장비 I/O를 직접 수행하지 않습니다. UI widget 자체는 Qt 규칙에 따라 GUI thread에 남습니다.
-
-### 시퀀스
-
-`core.sequence_engine.SequenceEngine`은 Qt를 import하지 않습니다. `SequenceCommand` metadata를 이용해 값을 검증하고 플러그인이 제공한 executor를 호출하며, wait는 취소 가능한 방식으로 처리합니다. 기본 system command는 다음과 같습니다.
-
-- `Wait Time`, `Wait Until`
-- `Log Marker`
-- `Start Recording`, `Stop Recording`
-- `Safe Output Off`
-
-Recipe는 `schema_version: 1` JSON 형식을 사용합니다. 장비 명령을 추가할 때는 해당 플러그인의 `sequence_commands`에 선언하면 되며, `gui/panel_sequence.py`에 장비별 분기를 추가하지 않습니다.
-
-### 측정 데이터
-
-`DeviceManager.read_snapshot()`은 연결된 장비들의 값을 한 시점의 snapshot으로 반환합니다. 각 sample에는 다음 provenance 정보가 포함됩니다.
-
-- 증가하는 `sample_id`
-- `sampled_at_utc`
-- `response_ms`
-- snapshot 시점의 `age_ms`
-- freshness 상태
-
-`MeasurementPipeline`은 sample, 연결 상태, freshness 상태가 바뀌거나 sequence marker가 들어온 경우에 기록 행을 만듭니다. 이 방식은 polling 주기만큼 같은 값을 복제하는 문제를 줄이면서 데이터가 stale로 전환된 시점은 남깁니다.
-
 ## Plugin Studio
 
 Plugin Studio에서는 장비와 실험 플러그인을 애플리케이션 안에서 관리할 수 있습니다.
@@ -151,48 +83,6 @@ Plugin Studio에서는 장비와 실험 플러그인을 애플리케이션 안�
 - 대소문자만 다른 중복 ID 사용 금지
 
 파일 경로는 선택한 플러그인 패키지 안에 있어야 하며, Python 파일과 하위 package 이름은 유효한 Python identifier여야 합니다.
-
-## 프로젝트 구조
-
-```text
-UOSLabManager/
-├─ main.py                       애플리케이션 진입점
-├─ core/
-│  ├─ device_manager.py          장비 worker와 thread-safe proxy
-│  ├─ measurement_pipeline.py    측정 snapshot과 기록 정책
-│  ├─ sequence_engine.py         GUI 독립 sequence engine
-│  └─ plugin_manager.py          manifest 검색·검증·가져오기·내보내기
-├─ gui/
-│  ├─ main_window.py             주 작업 공간
-│  ├─ panel_*.py                 Data, Sequence, Camera, Settings
-│  └─ plugin_studio/             편집기와 Codex staging UI
-├─ plugins/
-│  ├─ devices/                   standard/composite 장비 플러그인
-│  └─ experiments/               실험 패널 및 workflow
-├─ assets/                       앱 아이콘 등 정적 자산
-├─ tests/                        core, 장비, UI 회귀 테스트
-└─ UOSLabManager.spec            Windows PyInstaller 설정
-```
-
-## 테스트
-
-전체 테스트:
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-GUI 테스트는 PyQt6와 Qt runtime이 서로 호환되는 환경에서 실행해야 합니다. 실제 전원공급기나 heater를 사용하는 검증은 mock/unit test와 분리하고, 장비 매뉴얼의 안전 절차를 따르세요.
-
-## Windows 실행 파일 빌드
-
-```powershell
-python -m PyInstaller --noconfirm UOSLabManager.spec
-```
-
-빌드 결과는 `dist/UOSLabManager/`에 생성됩니다. 실행 창과 Windows 실행 파일에는 `assets/uoslabmanager_icon.png` 및 `assets/uoslabmanager_icon.ico`가 적용됩니다.
-
-생성된 실행 파일만 별도로 배포하지 마세요. GPL 조건에 따라 해당 binary와 정확히 대응하는 전체 source, build specification, dependency 정보를 함께 제공해야 합니다. 빌드에는 `LICENSE`, `THIRD_PARTY_NOTICES.md`와 설치된 Python distribution에서 찾은 license 파일이 포함됩니다.
 
 ## 라이선스
 

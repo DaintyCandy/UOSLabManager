@@ -155,11 +155,24 @@ class SequenceEngine:
             device = raw_step.get("dev")
             command = raw_step.get("cmd")
             value = raw_step.get("val")
-            if device == "LS331" and command == "Wait Time":
-                value = self._number(value, f"Step {index} wait time")
-                if value < 0:
-                    raise ValueError(f"Step {index} has an invalid wait time.")
-                device, value = SYSTEM_DEVICE, value * 60.0
+            plugin = None
+            if (
+                device != SYSTEM_DEVICE
+                and not (isinstance(device, str) and device.startswith("experiment:"))
+            ):
+                plugin = self.resolve_device_plugin(device)
+                migration = (
+                    None if plugin is None
+                    else plugin.get_recipe_migration(command)
+                )
+                if migration is not None:
+                    try:
+                        migrated = migration.apply(value)
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(f"Step {index}: {error}") from error
+                    device = migrated["dev"]
+                    command = migrated["cmd"]
+                    value = migrated["val"]
             if device == SYSTEM_DEVICE:
                 value = self._validate_system_step(index, command, value)
             elif isinstance(device, str) and device.startswith("experiment:"):

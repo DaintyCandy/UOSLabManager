@@ -19,7 +19,7 @@ class DeviceSettingsPanel(QWidget):
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setMaximumHeight(120)
-        self.log_box.setStyleSheet("background:#000; color:#0F0; font-family:monospace;")
+        self.log_box.setStyleSheet("font-family:monospace;")
         layout.addWidget(self.log_box)
         group = QGroupBox(f"{plugin.display_name} Settings")
         grid = QGridLayout(group)

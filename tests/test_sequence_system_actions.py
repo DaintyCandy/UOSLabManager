@@ -64,6 +64,9 @@ class SequenceSystemActionTests(unittest.TestCase):
         self.assertIn("Safe Output Off", commands)
 
     def test_legacy_ls331_wait_is_converted_from_minutes_to_seconds(self):
+        from plugins.devices.lakeshore331.plugin import plugin as lakeshore
+
+        self.panel.set_device_plugins({lakeshore.device_id: lakeshore})
         steps = self.panel.validate_recipe({
             "schema_version": 1,
             "steps": [{"dev": "LS331", "cmd": "Wait Time", "val": 2}],
@@ -71,6 +74,21 @@ class SequenceSystemActionTests(unittest.TestCase):
         self.assertEqual(steps, [{
             "dev": SYSTEM_DEVICE, "cmd": "Wait Time", "val": 120.0,
         }])
+
+    def test_wait_sources_are_declared_by_device_columns(self):
+        from plugins.devices.ctvideo_3m.plugin import plugin as ctvideo
+        from plugins.devices.zup36_12.plugin import plugin as zup
+
+        self.panel.set_device_plugins({
+            zup.device_id: zup,
+            ctvideo.device_id: ctvideo,
+        })
+        sources = self.panel.wait_sources()
+        self.assertIn(
+            ("CTvideo Temperature", "CTVIDEO3M", "actual_temp_C", "degC"),
+            sources,
+        )
+        self.assertIn(("ZUP Power", "ZUP", "power_W", "W"), sources)
 
     def test_wait_time_is_interruptible(self):
         self.panel.engine.load([{
@@ -153,6 +171,50 @@ class SequenceSystemActionTests(unittest.TestCase):
         )
         self.assertIn("sequence_marker", measurement.data_logger.columns)
         measurement.timer.stop()
+
+    def test_measurement_alarm_rules_are_device_agnostic_and_edge_triggered(self):
+        from core.plugin_manager import AlarmRule
+
+        plugin = SimpleNamespace(
+            display_name="Generic Supply",
+            alarms=(AlarmRule("fault", normal_values=(None, "OK")),),
+        )
+        measurement = MeasurementPanels.__new__(MeasurementPanels)
+        measurement.plugins = {"GENERIC": plugin}
+        measurement._last_alarm_values = {}
+        measurement.log = self.logs.append
+
+        measurement._check_alarms({"GENERIC": {"fault": "FAULT"}})
+        measurement._check_alarms({"GENERIC": {"fault": "FAULT"}})
+        measurement._check_alarms({"GENERIC": {"fault": "OK"}})
+        measurement._check_alarms({"GENERIC": {"fault": "FAULT"}})
+
+        self.assertEqual(
+            self.logs,
+            ["Generic Supply alarm: FAULT", "Generic Supply alarm: FAULT"],
+        )
+
+    def test_main_window_safe_state_uses_plugin_capabilities(self):
+        from core.plugin_manager import DevicePlugin, SafeAction
+
+        class GenericPlugin(DevicePlugin):
+            device_id = "GENERIC"
+            display_name = "Generic Supply"
+            safe_actions = (SafeAction("disable"),)
+
+            def connect(self, connection):
+                return None
+
+        device = SimpleNamespace(disable=lambda: self.logs.append("disabled"))
+        window = SimpleNamespace(
+            plugins={"GENERIC": GenericPlugin()},
+            manager=SimpleNamespace(get_device=lambda device_id: device),
+        )
+
+        errors = MainWindow._device_safe_state_errors(window)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(self.logs, ["disabled"])
 
     def test_sequence_tab_changes_color_while_running(self):
         tabs = QTabWidget()

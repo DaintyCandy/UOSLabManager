@@ -657,9 +657,11 @@ class PluginStudioPanel(QWidget):
             ")\n"
         )
         panel_source = (
+            '"""Theme-neutral experiment UI with no background override."""\n\n'
             "from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget\n\n"
             "from gui.widget_busy_spinner import run_busy_task\n\n\n"
             "class ExperimentPanel(QWidget):\n"
+            "    \"\"\"Experiment panel that inherits all host backgrounds.\"\"\"\n\n"
             "    def __init__(self, manager, parent=None):\n"
             "        super().__init__(parent)\n"
             "        self.manager = manager\n"
@@ -774,7 +776,7 @@ class PluginStudioPanel(QWidget):
                 '"""Custom GUI for a composite device."""\n\n'
                 "from gui.panel_device import DeviceSettingsPanel\n\n\n"
                 "class CompositeDevicePanel(DeviceSettingsPanel):\n"
-                "    \"\"\"Extend this panel for secondary resources or streams.\"\"\"\n\n"
+                "    \"\"\"Composite panel with no widget background overrides.\"\"\"\n\n"
                 "    def shutdown(self):\n"
                 "        pass\n"
             )
@@ -784,7 +786,7 @@ class PluginStudioPanel(QWidget):
                 '"""Default GUI for a standard device."""\n\n'
                 "from gui.panel_device import DeviceSettingsPanel\n\n\n"
                 "class StandardDevicePanel(DeviceSettingsPanel):\n"
-                "    \"\"\"Basic connection panel ready for device controls.\"\"\"\n\n"
+                "    \"\"\"Connection panel that inherits all host backgrounds.\"\"\"\n\n"
                 "    pass\n"
             )
         (plugin_dir / "panel.py").write_text(panel_source, encoding="utf-8")
@@ -815,7 +817,13 @@ class PluginStudioPanel(QWidget):
         (plugin_dir / "README.md").write_text(
             f"# {display_name}\n\n"
             f"Device profile: `{profile}`. Complete `driver.py`, update the "
-            "measurement columns, and add contract tests before connecting hardware.\n",
+            "measurement columns, and add contract tests before connecting hardware.\n\n"
+            "Declare host integrations in `plugin.py`: use DataColumn `unit` and "
+            "`condition_label` for Wait Until sources, `AlarmRule` for alarms, "
+            "`SafeAction` for emergency output state, and `RecipeMigration` for "
+            "legacy recipes. Keep device IDs and driver methods out of core/gui. "
+            "Keep panel and widget backgrounds unspecified; inherit the host style "
+            "instead of creating separate dark and light UI variants.\n",
             encoding="utf-8",
         )
         self.refresh_tree(source_path)
