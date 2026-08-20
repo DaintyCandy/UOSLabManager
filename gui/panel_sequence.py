@@ -22,16 +22,6 @@ from core.sequence_engine import (
 )
 
 
-WAIT_SOURCES = (
-    ("CTvideo Temperature", "CTVIDEO3M", "actual_temp_C", "degC"),
-    ("LS331 Temperature A", "LS331", "A_temp_K", "K"),
-    ("LS331 Temperature B", "LS331", "B_temp_K", "K"),
-    ("ZUP Voltage", "ZUP", "voltage_V", "V"),
-    ("ZUP Current", "ZUP", "current_A", "A"),
-    ("ZUP Power", "ZUP", "power_W", "W"),
-)
-
-
 @dataclass
 class _GuiRequest:
     name: str
@@ -44,12 +34,12 @@ class _GuiRequest:
 class WaitConditionDialog(QDialog):
     """Collect a portable measurement condition for a sequence recipe."""
 
-    def __init__(self, parent=None):
+    def __init__(self, sources, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Wait Until")
         form = QFormLayout(self)
         self.source = QComboBox()
-        for label, device, key, unit in WAIT_SOURCES:
+        for label, device, key, unit in sources:
             self.source.addItem(label, (device, key, unit))
         self.operator = QComboBox()
         self.operator.addItems([">=", "<=", ">", "<", "Within"])
@@ -274,6 +264,20 @@ class SequencePanel(QWidget):
             return self.experiment_plugins.get(source.partition(":")[2])
         return self.engine.resolve_device_plugin(source)
 
+    def wait_sources(self):
+        """Build condition sources entirely from device plug-in metadata."""
+        sources = []
+        for plugin in self.device_plugins.values():
+            for column in getattr(plugin, "columns", ()):
+                if getattr(column, "wait_condition_enabled", False):
+                    sources.append((
+                        column.condition_label,
+                        plugin.device_id,
+                        column.key,
+                        column.unit,
+                    ))
+        return tuple(sources)
+
     def _command_for(self, source, command):
         plugin = self._plugin_for_source(source)
         return self.engine.find_command(plugin, command)
@@ -337,7 +341,14 @@ class SequencePanel(QWidget):
             return
         if source == SYSTEM_DEVICE:
             if command == "Wait Until":
-                dialog = WaitConditionDialog(self)
+                sources = self.wait_sources()
+                if not sources:
+                    QMessageBox.warning(
+                        self, "Sequence",
+                        "No device plug-in exposes a measurement for Wait Until.",
+                    )
+                    return
+                dialog = WaitConditionDialog(sources, self)
                 if dialog.exec() != QDialog.DialogCode.Accepted:
                     return
                 value = dialog.condition()

@@ -248,32 +248,24 @@ class MainWindow(QMainWindow):
                     panel.emergency_stop()
                 except Exception as error:
                     errors.append(f"experiment: {error}")
-        commands = (
-            ("LS331", (("heater_off", None),)),
-            ("K2400", (("output_off", None),)),
-            (
-                "ZUP",
-                (
-                    ("output_off", None),
-                    ("set_voltage", 0.0),
-                    ("set_current", 0.0),
-                ),
-            ),
-        )
-        for device_id, actions in commands:
-            device = self.manager.get_device(device_id)
-            if device is None:
-                continue
-            for method, value in actions:
-                try:
-                    if value is None:
-                        getattr(device, method)()
-                    else:
-                        getattr(device, method)(value)
-                except Exception as error:
-                    errors.append(f"{device_id}.{method}: {error}")
+        errors.extend(self._device_safe_state_errors())
         if errors:
             raise RuntimeError("; ".join(errors))
+
+    def _device_safe_state_errors(self):
+        """Apply safe states declared by connected device plug-ins."""
+        errors = []
+        for plugin in self.plugins.values():
+            if not getattr(plugin, "safe_actions", ()):
+                continue
+            device = self.manager.get_device(plugin.device_id)
+            if device is None:
+                continue
+            try:
+                plugin.enter_safe_state(device)
+            except Exception as error:
+                errors.append(f"{plugin.display_name}: {error}")
+        return errors
 
     def _build_header(self):
         header = QWidget()
@@ -570,16 +562,12 @@ class MainWindow(QMainWindow):
                 panel.stop_video()
         for panel in self.experiment_tabs.values():
             if hasattr(panel, "emergency_stop"):
-                panel.emergency_stop()
-        for device_id, stop_method in (
-            ("LS331", "heater_off"), ("K2400", "output_off"), ("ZUP", "output_off")
-        ):
-            device = self.manager.get_device(device_id)
-            if device is not None:
                 try:
-                    getattr(device, stop_method)()
+                    panel.emergency_stop()
                 except Exception as error:
-                    self.log(f"Emergency stop warning ({device_id}): {error}")
+                    self.log(f"Emergency stop warning (experiment): {error}")
+        for error in self._device_safe_state_errors():
+            self.log(f"Emergency stop warning ({error})")
         self.manager.close_all()
         self.update_device_status()
         self.log("EMERGENCY STOP ACTIVATED")

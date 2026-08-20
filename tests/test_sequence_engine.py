@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 
-from core.plugin_manager import DevicePlugin, SequenceCommand
+from core.plugin_manager import DevicePlugin, RecipeMigration, SequenceCommand
 from core.sequence_engine import (
     SYSTEM_DEVICE, SequenceEngine, SequenceState,
 )
@@ -24,6 +24,12 @@ class FakePlugin(DevicePlugin):
     device_id = "FAKE"
     display_name = "Fake Device"
     sequence_aliases = ("OLD_FAKE",)
+    recipe_migrations = (
+        RecipeMigration(
+            command="Legacy Wait", target_device="SYSTEM",
+            target_command="Wait Time", transform=lambda value: value * 2,
+        ),
+    )
     sequence_commands = (
         SequenceCommand(
             key="Set Value", label="Set Value", unit="V",
@@ -79,6 +85,15 @@ class SequenceEngineTests(unittest.TestCase):
                 "schema_version": 1,
                 "steps": [{"dev": "FAKE", "cmd": "Set Value", "val": 11}],
             })
+
+    def test_plugin_migrates_a_legacy_recipe_without_core_device_knowledge(self):
+        steps = self.engine.validate_recipe({
+            "schema_version": 1,
+            "steps": [{"dev": "OLD_FAKE", "cmd": "Legacy Wait", "val": 3}],
+        })
+        self.assertEqual(steps, [{
+            "dev": SYSTEM_DEVICE, "cmd": "Wait Time", "val": 6.0,
+        }])
 
     def test_stop_interrupts_wait_without_waiting_for_timeout(self):
         self.engine.load([{

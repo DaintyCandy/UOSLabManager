@@ -20,14 +20,30 @@ from PyQt6.QtWidgets import (
     QTextEdit, QVBoxLayout, QWidget,
 )
 
+from .codex_presentation import should_display_codex_log
+
 
 EDITABLE_SUFFIXES = {".py", ".json", ".md", ".txt"}
 
 DEVICE_UI_STYLE_GUIDE = """# UOSLabManager device UI style contract
 
-This guide summarizes the established Keithley 2400, GPD-3303S, ZUP36-12,
-and LakeShore331 panels. Treat it as a compatibility contract, not a design
-suggestion.
+This guide summarizes the established built-in standard and composite device
+panels. Treat it as a compatibility contract, not a design suggestion.
+
+## Host theme inheritance
+
+- Build one theme-neutral panel. Do not create separate dark/light layouts,
+  stylesheets, color tables, or runtime theme branches.
+- Do not set `background` or `background-color` on the panel, containers, labels,
+  inputs, buttons, tabs, tables, or logs. Leave their backgrounds unspecified so
+  the host application supplies them.
+- Inherit the application's palette and shared QSS for ordinary widget styling.
+  Do not replace the widget palette merely to make a generated UI look complete.
+- If an opaque canvas is technically required for video or custom painting, use a
+  host `QPalette` role at paint time rather than a named theme color. Do this only
+  for that canvas, not its surrounding panel.
+- Express connected, warning, fault, and emergency states with text, icons, or a
+  semantic foreground/border; do not add colored background fills.
 
 ## Page structure
 
@@ -45,9 +61,8 @@ suggestion.
 - Prefer QGroupBox with QFormLayout for labeled settings and QGridLayout for
   compact monitor values. Keep labels short and include engineering units.
 - Use green for connected/healthy, red for disconnected/fault, and orange for
-  pending or warning states. Limit custom style sheets to semantic status,
-  emergency actions, and the black monospace log; inherit the application theme
-  everywhere else.
+  pending or warning states. Apply these to text, icons, or borders only. Leave
+  widget and log backgrounds to the host application.
 - Keep Connect/Disconnect status visible. Put connection details and advanced
   serial options in the Connection tab rather than the summary area.
 - Reuse small spin-box factory helpers so decimals, ranges, and defaults are
@@ -67,6 +82,32 @@ suggestion.
 Before finishing, compare panel.py against every section above and retain the
 existing panel's established structure unless the user explicitly requests a
 different UI.
+"""
+
+EXPERIMENT_UI_STYLE_GUIDE = """# UOSLabManager experiment UI style contract
+
+## Host theme inheritance
+
+- Build one theme-neutral panel. Do not create separate dark/light layouts,
+  stylesheets, color tables, or runtime theme branches.
+- Do not set `background` or `background-color` on the panel, containers, labels,
+  inputs, buttons, tabs, tables, plots, or logs. Leave their backgrounds
+  unspecified so the host application supplies them.
+- Inherit the application's palette and shared QSS for ordinary widget styling.
+  Do not replace the widget palette merely to make a generated UI look complete.
+- If an opaque plotting or custom-painted canvas is technically required, use a
+  host `QPalette` role at paint time and limit it to that canvas.
+- Express semantic states with text, icons, or foreground/border colors rather
+  than background fills.
+
+## Layout and behavior
+
+- Use Qt layouts rather than absolute coordinates and let the host provide page
+  scrolling. Avoid fixed page widths and unnecessarily large minimum sizes.
+- Keep QWidget access on the GUI thread. Run blocking work through run_busy_task
+  or a QThread and stop timers and threads in shutdown().
+- Preserve the existing panel's visual structure unless the user explicitly asks
+  for a redesign.
 """
 
 
@@ -115,6 +156,12 @@ class CodexWorker(QThread):
             "For device UI work, read UI_STYLE_GUIDE.md first and follow it as a "
             "style contract derived from the existing built-in device panels. Do "
             "not invent a new visual language unless the user explicitly asks. "
+            "For every device or experiment UI, create one host-theme-neutral "
+            "implementation; never generate separate dark/light variants or theme "
+            "branches. Do not set background or background-color for the panel or "
+            "ordinary widgets. Leave backgrounds unspecified so the application "
+            "palette and shared QSS supply them. Use text, icons, foregrounds, or "
+            "borders instead of background fills for semantic states. "
             "Inspect existing files only as needed. Make "
             "the requested edits directly, then summarize the changes briefly."
         )
@@ -235,7 +282,7 @@ class CodexWorker(QThread):
             message = "\n".join(filter(None, [explanation, *steps]))
             return "PLAN", message or "Plan updated"
         if method == "turn/diff/updated":
-            return "WORKFLOW", "Proposed file diff updated"
+            return None
         if method == "item/mcpToolCall/progress":
             return "TOOL", getattr(payload, "message", "Tool call in progress")
         if method not in {"item/started", "item/completed"}:
@@ -246,13 +293,7 @@ class CodexWorker(QThread):
         item_type = getattr(item, "type", None)
         phase = "START" if method == "item/started" else "DONE"
         if item_type == "commandExecution":
-            command = getattr(item, "command", "")
-            if phase == "START":
-                return "COMMAND", command
-            status = cls._value(getattr(item, "status", "completed"))
-            exit_code = getattr(item, "exit_code", None)
-            suffix = f" (exit {exit_code})" if exit_code is not None else ""
-            return "COMMAND", f"{status}{suffix}: {command}"
+            return None
         if item_type == "fileChange":
             changes = getattr(item, "changes", ())
             paths = []
@@ -346,7 +387,7 @@ class CodexPanel(QWidget):
 
         self.log_view = QTextBrowser()
         self.log_view.setPlaceholderText(
-            "Codex responses, proposed changes, and validation results appear here"
+            "Codex responses and validation results appear here"
         )
         self.log_view.setFont(self.font())
         self.log_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -374,7 +415,7 @@ class CodexPanel(QWidget):
         send_row.addStretch()
         self.staged_label = QLabel("NO STAGED CHANGES")
         self.staged_label.setStyleSheet(
-            "color:#8b949e; font-weight:700; letter-spacing:1px;"
+            "font-weight:700; letter-spacing:1px;"
         )
         send_row.addWidget(self.staged_label)
         self.apply_button = QPushButton("Apply")
@@ -388,6 +429,8 @@ class CodexPanel(QWidget):
         self._set_staging_state(False)
 
     def _log(self, category, message):
+        if not should_display_codex_log(category):
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         escaped_message = html.escape(str(message)).replace("\n", "<br>")
         self.log_view.append(
@@ -461,7 +504,7 @@ class CodexPanel(QWidget):
         else:
             self.staged_label.setText("NO STAGED CHANGES")
             self.staged_label.setStyleSheet(
-                "color:#8b949e; font-weight:700; letter-spacing:1px;"
+                "font-weight:700; letter-spacing:1px;"
             )
             self.apply_button.setStyleSheet("")
             self.reject_button.setStyleSheet("")
@@ -553,15 +596,15 @@ class CodexPanel(QWidget):
             self.worker.submit(request)
 
     def _workflow_event(self, category, message):
-        self._log(category, message)
+        if should_display_codex_log(category):
+            self._log(category, message)
 
     def _codex_completed(self, response, _usage):
         self._log("CODEX", response)
         diff = self._build_diff()
         self._set_staging_state(bool(diff))
-        self._log("PROPOSED CHANGES", diff or "No editable plugin files changed.")
         self._log("VALIDATION", self._validate_staged())
-        self.status.setText("Review the proposed changes")
+        self.status.setText("Codex changes are ready for review")
         self.request_active = False
         self.model_combo.setEnabled(True)
         self.reasoning_combo.setEnabled(True)
@@ -673,7 +716,11 @@ class CodexPanel(QWidget):
                 "`sequence_commands` tuple. Declare each command with "
                 "`SequenceCommand` metadata and an executor accepting "
                 "`(device, value, context)`; do not add device dispatch branches to "
-                "the sequence GUI. "
+                "the sequence GUI. Declare Wait Until measurements with "
+                "`DataColumn(unit=..., condition_label=...)`, measurement alarms "
+                "with `AlarmRule`, emergency output behavior with `SafeAction`, and "
+                "old recipe translations with `RecipeMigration`; do not add "
+                "device IDs or driver method names to core or gui modules. "
                 "Connect and run panel device commands with `run_busy_task` so no "
                 "DeviceProxy call blocks the GUI. Let its delayed shared spinner "
                 "remain text-free; do not show a custom spinner. QWidget updates "
@@ -683,7 +730,8 @@ class CodexPanel(QWidget):
                 "safely stop timers and threads in `shutdown()`. Do not "
                 "send commands to real hardware while editing or validating. "
                 "Read `UI_STYLE_GUIDE.md` before editing panel.py and check the "
-                "finished UI against every section of that guide. "
+                "finished UI against every section of that guide. Keep backgrounds "
+                "unspecified and do not create theme-specific UI branches. "
                 + (
                     "You may create any additional `.py` modules or nested Python "
                     "packages needed for independent resources, platform resolvers, "
@@ -706,15 +754,21 @@ class CodexPanel(QWidget):
                 "Keep QWidget access on the GUI thread, avoid duplicate task starts, "
                 "and consume timestamped snapshots without logging cached samples "
                 "again. Always implement `shutdown` "
-                "for timers, threads, and hardware cleanup.\n"
+                "for timers, threads, and hardware cleanup. Read "
+                "`UI_STYLE_GUIDE.md` before UI work. Keep widget backgrounds "
+                "unspecified and do not create theme-specific UI branches.\n"
             )
         (self.staging_dir / "PLUGIN_API.md").write_text(
             api_notes, encoding="utf-8"
         )
-        if self.plugin_kind == "device":
-            (self.staging_dir / "UI_STYLE_GUIDE.md").write_text(
-                DEVICE_UI_STYLE_GUIDE, encoding="utf-8"
-            )
+        ui_style_guide = (
+            DEVICE_UI_STYLE_GUIDE
+            if self.plugin_kind == "device"
+            else EXPERIMENT_UI_STYLE_GUIDE
+        )
+        (self.staging_dir / "UI_STYLE_GUIDE.md").write_text(
+            ui_style_guide, encoding="utf-8"
+        )
 
     @staticmethod
     def _read_editable_files(root):

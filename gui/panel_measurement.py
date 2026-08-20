@@ -16,6 +16,9 @@ from PyQt6.QtWidgets import (
 from .widget_graph_selection import GraphSelectionTree
 
 
+_MISSING = object()
+
+
 class MeasurementPanels:
     COLORS = ("#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b")
     DEFAULT_UPDATE_INTERVAL_MS = 1000
@@ -62,7 +65,7 @@ class MeasurementPanels:
         self.rows = self.data_logger.rows
         self.pending_sequence_markers = []
         self._compat_sample_id = 0
-        self._last_zup_alarm = "AL00000"
+        self._last_alarm_values = {}
         self.recording = False
         self.timer = QTimer()
         self.timer.setInterval(self.update_interval_ms)
@@ -284,6 +287,7 @@ class MeasurementPanels:
     def set_plugins(self, plugins):
         """Refresh snapshot provenance after a safe plug-in reload."""
         self.plugins = dict(plugins)
+        self._last_alarm_values.clear()
         self.measurement_pipeline.plugins = dict(plugins)
         self.provenance_columns = self.measurement_pipeline.provenance_columns
         self.data_logger.columns = (
@@ -322,10 +326,7 @@ class MeasurementPanels:
             device_id: state.get("values", {})
             for device_id, state in snapshot["devices"].items()
         }
-        alarm = data.get("ZUP", {}).get("alarm", "AL00000")
-        if alarm and alarm != "AL00000" and alarm != self._last_zup_alarm:
-            self.log(f"ZUP ALARM DETECTED: {alarm}")
-        self._last_zup_alarm = alarm or "AL00000"
+        self._check_alarms(data)
 
         row = self.measurement_pipeline.ingest(
             snapshot, tuple(self.pending_sequence_markers)
@@ -353,6 +354,22 @@ class MeasurementPanels:
                 numeric = float("nan")
             self.series[label].append(numeric)
         self._refresh_curves()
+
+    def _check_alarms(self, data):
+        """Report plug-in-declared alarms only when their value changes."""
+        configured = set()
+        for device_id, plugin in self.plugins.items():
+            values = data.get(device_id, {})
+            for rule in getattr(plugin, "alarms", ()):
+                cache_key = (device_id, rule.key)
+                configured.add(cache_key)
+                value = values.get(rule.key)
+                previous = self._last_alarm_values.get(cache_key, _MISSING)
+                if rule.is_active(value) and value != previous:
+                    self.log(rule.format_message(plugin.display_name, value))
+                self._last_alarm_values[cache_key] = value
+        for cache_key in set(self._last_alarm_values) - configured:
+            self._last_alarm_values.pop(cache_key, None)
 
     def _append_table_row(self, row):
         while self.table.rowCount() >= self.buffer_rows:

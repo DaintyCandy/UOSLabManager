@@ -1,4 +1,6 @@
-from core.plugin_manager import DataColumn, DevicePlugin, SequenceCommand
+from core.plugin_manager import (
+    AlarmRule, DataColumn, DevicePlugin, SafeAction, SequenceCommand,
+)
 
 
 def create_settings_panel(manager, parent):
@@ -25,9 +27,29 @@ class ZUP3612Plugin(DevicePlugin):
     connection_label = "Port"
     default_connection = "COM4"
     columns = (
-        DataColumn("voltage_V", "ZUP_voltage_V"),
-        DataColumn("current_A", "ZUP_current_A"),
-        DataColumn("power_W", "ZUP_power_W"),
+        DataColumn(
+            "voltage_V", "ZUP_voltage_V", unit="V",
+            condition_label="ZUP Voltage",
+        ),
+        DataColumn(
+            "current_A", "ZUP_current_A", unit="A",
+            condition_label="ZUP Current",
+        ),
+        DataColumn(
+            "power_W", "ZUP_power_W", unit="W",
+            condition_label="ZUP Power",
+        ),
+    )
+    alarms = (
+        AlarmRule(
+            "alarm", message="{device} ALARM DETECTED: {value}",
+            normal_values=(None, "", "AL00000"),
+        ),
+    )
+    safe_actions = (
+        SafeAction("output_off"),
+        SafeAction("set_voltage", (0.0,)),
+        SafeAction("set_current", (0.0,)),
     )
     settings_factory = staticmethod(create_settings_panel)
     sequence_aliases = ("ZUP36-12",)

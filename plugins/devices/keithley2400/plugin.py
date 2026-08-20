@@ -1,4 +1,4 @@
-from core.plugin_manager import DataColumn, DevicePlugin, SequenceCommand
+from core.plugin_manager import DataColumn, DevicePlugin, SafeAction, SequenceCommand
 
 
 def create_settings_panel(manager, parent):
@@ -25,11 +25,21 @@ class Keithley2400Plugin(DevicePlugin):
     connection_label = "Address"
     default_connection = "GPIB0::24::INSTR"
     columns = (
-        DataColumn("voltage_V", "K2400_voltage_V"),
-        DataColumn("current_A", "K2400_current_A"),
-        DataColumn("power_W", "K2400_power_W"),
+        DataColumn(
+            "voltage_V", "K2400_voltage_V", unit="V",
+            condition_label="K2400 Voltage",
+        ),
+        DataColumn(
+            "current_A", "K2400_current_A", unit="A",
+            condition_label="K2400 Current",
+        ),
+        DataColumn(
+            "power_W", "K2400_power_W", unit="W",
+            condition_label="K2400 Power",
+        ),
         DataColumn("resistance_Ohm", "K2400_resistance_Ohm"),
     )
+    safe_actions = (SafeAction("output_off"),)
     settings_factory = staticmethod(create_settings_panel)
     sequence_commands = (
         SequenceCommand(

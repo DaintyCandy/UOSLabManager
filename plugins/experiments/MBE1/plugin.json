@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "id": "thermo",
-  "name": "Thermo",
+  "id": "MBE1",
+  "name": "Mbe1",
   "type": "experiment",
   "entrypoint": "plugin.py:plugin",
   "enabled": true,

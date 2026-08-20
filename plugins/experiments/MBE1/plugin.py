@@ -7,15 +7,15 @@ def create_panel(manager, parent):
 
 
 plugin = ExperimentPlugin(
-    experiment_id='thermo',
-    display_name='Thermo',
+    experiment_id='MBE1',
+    display_name='MBE Chamber Monitor',
     panel_factory=create_panel,
     sequence_commands=(
         SequenceCommand(
-            key="set_value", label="Set Value", unit="",
-            minimum=0.0, maximum=100.0, default=0.0, decimals=2,
+            key="set_temperature_setpoint", label="Set temperature setpoint", unit="°C",
+            minimum=0.0, maximum=2000.0, default=25.0, decimals=1,
         ),
     ),
-    description="User experiment panel",
+    description="MBE chamber camera, pyrometer, and heating-control monitor",
     order=100,
 )

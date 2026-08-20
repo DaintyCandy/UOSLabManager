@@ -29,6 +29,57 @@ WINDOWS_RESERVED_NAMES = {
 class DataColumn:
     key: str
     label: str
+    unit: str = ""
+    condition_label: str = ""
+
+    @property
+    def wait_condition_enabled(self) -> bool:
+        """Return whether the column can be selected by a sequence condition."""
+        return bool(self.condition_label)
+
+
+@dataclass(frozen=True)
+class AlarmRule:
+    """Describe a measurement value that should be reported on state changes."""
+
+    key: str
+    message: str = "{device} alarm: {value}"
+    normal_values: tuple[Any, ...] = (None, "", False, 0)
+
+    def is_active(self, value: Any) -> bool:
+        return not any(value == normal for normal in self.normal_values)
+
+    def format_message(self, device: str, value: Any) -> str:
+        return self.message.format(device=device, value=value)
+
+
+@dataclass(frozen=True)
+class SafeAction:
+    """One best-effort driver call used to put a device in a safe state."""
+
+    method: str
+    args: tuple[Any, ...] = ()
+    kwargs: tuple[tuple[str, Any], ...] = ()
+
+    def execute(self, device: Any) -> Any:
+        return getattr(device, self.method)(*self.args, **dict(self.kwargs))
+
+
+@dataclass(frozen=True)
+class RecipeMigration:
+    """Translate one legacy plug-in command into a current recipe step."""
+
+    command: str
+    target_device: str
+    target_command: str
+    transform: Callable[[Any], Any] = lambda value: value
+
+    def apply(self, value: Any) -> dict[str, Any]:
+        return {
+            "dev": self.target_device,
+            "cmd": self.target_command,
+            "val": self.transform(value),
+        }
 
 
 @dataclass(frozen=True)
@@ -108,9 +159,12 @@ class DevicePlugin(ABC):
     connection_label: str = "Address"
     default_connection: str = ""
     columns: tuple[DataColumn, ...] = ()
+    alarms: tuple[AlarmRule, ...] = ()
+    safe_actions: tuple[SafeAction, ...] = ()
     settings_factory: Callable[[Any, Any], Any] | None = None
     sequence_commands: tuple[SequenceCommand, ...] = ()
     sequence_aliases: tuple[str, ...] = ()
+    recipe_migrations: tuple[RecipeMigration, ...] = ()
 
     @abstractmethod
     def connect(self, connection: str):
@@ -127,6 +181,27 @@ class DevicePlugin(ABC):
             (command for command in self.sequence_commands if command.key == key),
             None,
         )
+
+    def get_recipe_migration(self, key: str) -> RecipeMigration | None:
+        return next(
+            (
+                migration
+                for migration in self.recipe_migrations
+                if migration.command == key
+            ),
+            None,
+        )
+
+    def enter_safe_state(self, device: Any) -> None:
+        """Run every declared safe-state action and report all failures together."""
+        errors = []
+        for action in self.safe_actions:
+            try:
+                action.execute(device)
+            except Exception as error:
+                errors.append(f"{action.method}: {error}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
 
 def load_device_plugins(

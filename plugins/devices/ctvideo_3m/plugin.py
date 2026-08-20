@@ -14,7 +14,10 @@ class CTVideo3MPlugin(DevicePlugin):
     connection_label = "Port"
     default_connection = default_ctvideo_connection()
     columns = (
-        DataColumn("actual_temp_C", "CTvideo_actual_C"),
+        DataColumn(
+            "actual_temp_C", "CTvideo_actual_C", unit="degC",
+            condition_label="CTvideo Temperature",
+        ),
     )
     settings_factory = staticmethod(create_settings_panel)
 
