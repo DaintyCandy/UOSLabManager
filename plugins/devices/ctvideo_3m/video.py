@@ -153,11 +153,7 @@ class CTVideoWorker(QThread):
         with self._request_lock:
             self._pending_display_settings = validated
 
-    def set_compactconnect_video_gain(self, value, *, confirmed=False):
-        if confirmed is not True:
-            raise PermissionError(
-                "Queueing a persistent Video Gain write requires confirmed=True."
-            )
+    def set_compactconnect_video_gain(self, value):
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError("CompactConnect Video Gain must be an integer.")
         if not 1 <= value <= 255:
@@ -165,11 +161,7 @@ class CTVideoWorker(QThread):
         with self._request_lock:
             self._pending_video_gain = value
 
-    def set_compactconnect_anti_flicker(self, mode, *, confirmed=False):
-        if confirmed is not True:
-            raise PermissionError(
-                "Queueing a persistent Anti-flicker write requires confirmed=True."
-            )
+    def set_compactconnect_anti_flicker(self, mode):
         if isinstance(mode, bool) or not isinstance(mode, int):
             raise TypeError("CompactConnect Anti-flicker mode must be an integer.")
         if mode not in (0, 1, 2):
@@ -409,9 +401,7 @@ class CTVideoWorker(QThread):
                     try:
                         if controller is None:
                             raise RuntimeError("Vendor camera control is unavailable")
-                        written = controller.set_compactconnect_video_gain(
-                            video_gain, acknowledged=True
-                        )
+                        written = controller.set_compactconnect_video_gain(video_gain)
                         self._emit_camera_results(
                             [self._gain_write_result(written)], "video_gain_apply"
                         )
@@ -434,7 +424,7 @@ class CTVideoWorker(QThread):
                         if controller is None:
                             raise RuntimeError("Vendor camera control is unavailable")
                         written = controller.set_compactconnect_anti_flicker(
-                            anti_flicker, acknowledged=True
+                            anti_flicker
                         )
                         self._emit_camera_results(
                             [self._anti_flicker_write_result(written)],
@@ -511,9 +501,10 @@ class CTVideoView(QWidget):
     camera_properties = pyqtSignal(object)
     _sessions = {}
 
-    def __init__(self, log_callback, parent=None):
+    def __init__(self, log_callback, parent=None, camera_workspace=None):
         super().__init__(parent)
         self.log = log_callback
+        self.camera_workspace = camera_workspace
         self.worker = None
         self._session_key = None
         self.source = 0
@@ -614,6 +605,10 @@ class CTVideoView(QWidget):
         self.worker.source_opened.connect(self.handle_source_opened)
         self.worker.hardware_status.connect(self.handle_hardware_status)
         self.worker.finished.connect(self.worker_finished)
+        if self.camera_workspace is not None:
+            self.camera_workspace.attach_external_stream(
+                self.worker, 0, camera_name or "CTvideo 3M"
+            )
         self.status.setText(
             f"Video thread: {'starting' if start_worker else 'shared'} ({source})"
         )
@@ -655,24 +650,16 @@ class CTVideoView(QWidget):
         self.worker.set_video_display_settings(self._last_display_settings)
         return True
 
-    def set_compactconnect_video_gain(self, value, *, confirmed=False):
-        if confirmed is not True:
-            raise PermissionError(
-                "Queueing a persistent Video Gain write requires confirmed=True."
-            )
+    def set_compactconnect_video_gain(self, value):
         if self.worker is None:
             return False
-        self.worker.set_compactconnect_video_gain(value, confirmed=True)
+        self.worker.set_compactconnect_video_gain(value)
         return True
 
-    def set_compactconnect_anti_flicker(self, mode, *, confirmed=False):
-        if confirmed is not True:
-            raise PermissionError(
-                "Queueing a persistent Anti-flicker write requires confirmed=True."
-            )
+    def set_compactconnect_anti_flicker(self, mode):
         if self.worker is None:
             return False
-        self.worker.set_compactconnect_anti_flicker(mode, confirmed=True)
+        self.worker.set_compactconnect_anti_flicker(mode)
         return True
 
     def request_camera_properties(self):
@@ -689,6 +676,8 @@ class CTVideoView(QWidget):
             if session is not None and session["worker"] is worker:
                 last_view = session["views"] == {self}
                 if last_view:
+                    if self.camera_workspace is not None:
+                        self.camera_workspace.detach_external_stream(worker, 0)
                     worker.requestInterruption()
                     if worker.isRunning():
                         self._disconnect_worker(worker, keep_finished=True)
@@ -750,6 +739,8 @@ class CTVideoView(QWidget):
 
     def worker_finished(self):
         worker = self.sender()
+        if self.camera_workspace is not None:
+            self.camera_workspace.detach_external_stream(worker, 0)
         if self.worker is worker:
             key = self._session_key
             session = self._sessions.get(key)

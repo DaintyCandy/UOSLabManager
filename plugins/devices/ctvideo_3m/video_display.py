@@ -21,6 +21,7 @@ import numpy as np
 VIDEO_DISPLAY_PROFILE_KEY = "video_display"
 _COLOR_PATTERN = re.compile(r"^#?([0-9a-fA-F]{6})$")
 _REFERENCE_BACKGROUND_DIAMETER = 480
+_VIDEO_VERTICAL_FOV_DEG = 2.4
 
 
 def _number(name: str, value: object, minimum: float, maximum: float) -> float:
@@ -75,6 +76,7 @@ class CompactConnectVideoDisplaySettings:
     target_circle_style: str = "solid"
     target_circle_width: int = 5
     target_circle_color: str = "#FF0000"
+    target_optical_resolution: int = 0
     background_color: str = "#404040"
     background_circle_color: str = "#000000"
     background_circle_diameter: int = _REFERENCE_BACKGROUND_DIAMETER
@@ -101,6 +103,16 @@ class CompactConnectVideoDisplaySettings:
             self,
             "target_circle_width",
             _integer("target_circle_width", self.target_circle_width, 0, 25),
+        )
+        object.__setattr__(
+            self,
+            "target_optical_resolution",
+            _integer(
+                "target_optical_resolution",
+                self.target_optical_resolution,
+                0,
+                1000,
+            ),
         )
         for name in (
             "target_circle_color",
@@ -253,6 +265,18 @@ def _draw_dotted_circle(
         cv2_module.circle(frame, point, dot_radius, color, -1, line_type)
 
 
+def _target_circle_diameter(shortest: int, optical_resolution: int) -> int:
+    if not optical_resolution:
+        return max(2, int(shortest) // 6)
+    vertical_span = 2.0 * math.tan(
+        math.radians(_VIDEO_VERTICAL_FOV_DEG / 2.0)
+    )
+    return max(
+        2,
+        int(round(int(shortest) / (int(optical_resolution) * vertical_span))),
+    )
+
+
 def _apply_circular_background(
     frame: np.ndarray,
     diameter: int,
@@ -293,10 +317,10 @@ def process_frame(
 ) -> np.ndarray:
     """Return a processed BGR frame without mutating ``frame`` or hardware.
 
-    The target-circle diameter is not exposed by CompactConnect's Adjust Video
-    dialog; the real application derives it from pyrometer optics and distance.
-    Until that geometry is available to this application, a centered fallback
-    diameter of one sixth of the output's shorter dimension is used.
+    When sensor information supplies an optical D:S resolution, map the
+    measurement spot into the integrated camera's 2.4 degree vertical field of
+    view. Otherwise use a centered fallback diameter of one sixth of the
+    output's shorter dimension.
     """
 
     if not isinstance(settings, CompactConnectVideoDisplaySettings):
@@ -354,7 +378,9 @@ def process_frame(
         cv2_module,
     )
 
-    target_diameter = max(2, shortest // 6)
+    target_diameter = _target_circle_diameter(
+        shortest, settings.target_optical_resolution
+    )
     target_radius = max(1, target_diameter // 2)
     target_color = _bgr(settings.target_circle_color)
     if settings.target_circle_style == "dotted":

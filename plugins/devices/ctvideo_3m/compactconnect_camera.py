@@ -434,12 +434,8 @@ class CompactConnectCameraController:
         )
 
     def set_compactconnect_video_gain(
-        self, value: int, *, acknowledged: bool = False
+        self, value: int
     ) -> CompactConnectVideoGainWriteResult:
-        if acknowledged is not True:
-            raise PermissionError(
-                "Writing CompactConnect Video Gain requires acknowledged=True."
-            )
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError("CompactConnect Video Gain must be an integer.")
         if not VIDEO_GAIN_MINIMUM <= value <= VIDEO_GAIN_MAXIMUM:
@@ -476,12 +472,8 @@ class CompactConnectCameraController:
         return CompactConnectAntiFlickerSnapshot(raw_value=block[2], block=block)
 
     def set_compactconnect_anti_flicker(
-        self, mode: int, *, acknowledged: bool = False
+        self, mode: int
     ) -> CompactConnectAntiFlickerWriteResult:
-        if acknowledged is not True:
-            raise PermissionError(
-                "Writing CompactConnect Anti-flicker requires acknowledged=True."
-            )
         if isinstance(mode, bool) or not isinstance(mode, int):
             raise TypeError("Anti-flicker mode must be an integer.")
         if mode not in ANTI_FLICKER_MODES:

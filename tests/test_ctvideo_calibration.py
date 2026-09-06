@@ -55,6 +55,18 @@ class CTVideoCalibrationTests(unittest.TestCase):
         self.assertEqual(self.device.read_tweak_gain(), 1.0)
         self.assertEqual(self.written_packets(), [b"\x26", b"\x27"])
 
+    def test_sensor_information_identifies_model_and_optical_resolution(self):
+        self.queue_responses(
+            b"\x12\x34\x09\xC4\x2A\xF8"
+        )  # model word, 150.0 C, 1000.0 C
+
+        information = self.device.read_sensor_information()
+
+        self.assertEqual(information.model_word, 0x1234)
+        self.assertEqual(information.model_name, "CTvideo 3MH1")
+        self.assertEqual(information.optical_resolution, 300)
+        self.assertEqual(self.written_packets(), [b"\x45"])
+
     def test_set_offset_and_gain_send_exact_packets_and_verify_echo(self):
         self.queue_responses(b"\x03\xE8", b"\xA0\x00")
         self.assertEqual(

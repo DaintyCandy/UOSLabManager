@@ -9,29 +9,13 @@ from plugins.devices.ctvideo_3m.compactconnect_camera import (
 )
 
 
-class CompactConnectAntiFlickerSafetyTests(unittest.TestCase):
-    """No persistent anti-flicker write may happen implicitly."""
+class CompactConnectAntiFlickerValidationTests(unittest.TestCase):
+    """Validate immediate persistent anti-flicker writes."""
 
     def setUp(self):
         self.controller = CompactConnectCameraController(
             friendly_name="CTvideo offline anti-flicker test"
         )
-
-    def test_write_requires_explicit_acknowledgement_before_device_access(self):
-        with mock.patch.object(self.controller, "_require_open") as require_open:
-            for kwargs in ({}, {"acknowledged": False}):
-                with self.subTest(kwargs=kwargs):
-                    with self.assertRaises(PermissionError):
-                        self.controller.set_compactconnect_anti_flicker(1, **kwargs)
-
-        require_open.assert_not_called()
-
-    def test_acknowledgement_is_keyword_only(self):
-        with mock.patch.object(self.controller, "_require_open") as require_open:
-            with self.assertRaises(TypeError):
-                self.controller.set_compactconnect_anti_flicker(1, True)
-
-        require_open.assert_not_called()
 
     def test_invalid_modes_are_rejected_before_device_access(self):
         cases = (
@@ -45,9 +29,7 @@ class CompactConnectAntiFlickerSafetyTests(unittest.TestCase):
             for mode, exception_type in cases:
                 with self.subTest(mode=mode):
                     with self.assertRaises(exception_type):
-                        self.controller.set_compactconnect_anti_flicker(
-                            mode, acknowledged=True
-                        )
+                        self.controller.set_compactconnect_anti_flicker(mode)
 
         require_open.assert_not_called()
 
@@ -61,9 +43,7 @@ class CompactConnectAntiFlickerSafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         RuntimeError, "native access attempted"
                     ):
-                        self.controller.set_compactconnect_anti_flicker(
-                            mode, acknowledged=True
-                        )
+                        self.controller.set_compactconnect_anti_flicker(mode)
 
         self.assertEqual(require_open.call_count, 3)
 
@@ -107,9 +87,7 @@ class CompactConnectAntiFlickerProtocolTests(unittest.TestCase):
             "read_compactconnect_anti_flicker",
             return_value=before,
         ), mock.patch.object(self.controller, "_write_eeprom_block") as write_block:
-            result = self.controller.set_compactconnect_anti_flicker(
-                1, acknowledged=True
-            )
+            result = self.controller.set_compactconnect_anti_flicker(1)
 
         self.assertTrue(result.verified)
         self.assertEqual(result.requested_raw, 25)
@@ -126,9 +104,7 @@ class CompactConnectAntiFlickerProtocolTests(unittest.TestCase):
         ) as read_setting, mock.patch.object(
             self.controller, "_write_eeprom_block"
         ) as write_block:
-            result = self.controller.set_compactconnect_anti_flicker(
-                2, acknowledged=True
-            )
+            result = self.controller.set_compactconnect_anti_flicker(2)
 
         expected = bytearray(before.block)
         expected[2] = 30
@@ -150,9 +126,7 @@ class CompactConnectAntiFlickerProtocolTests(unittest.TestCase):
             side_effect=RuntimeError("simulated write failure"),
         ) as write_block:
             with self.assertRaises(CompactConnectCameraError):
-                self.controller.set_compactconnect_anti_flicker(
-                    2, acknowledged=True
-                )
+                self.controller.set_compactconnect_anti_flicker(2)
 
         self.assertEqual(write_block.call_count, 1)
 

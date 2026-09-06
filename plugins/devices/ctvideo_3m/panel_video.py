@@ -1,13 +1,13 @@
 """Video display and persistent camera-control behavior for CTvideo 3M."""
 
 from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import QCheckBox, QColorDialog, QMessageBox, QPushButton
+from PyQt6.QtWidgets import QCheckBox, QColorDialog, QPushButton
 
 from .video_display import CompactConnectVideoDisplaySettings
 
 
 class CTVideoControlsMixin:
-    """Own software display controls and confirmed camera EEPROM actions."""
+    """Own instant software display and vendor camera EEPROM controls."""
 
     def _make_color_button(self, title, color):
         button = QPushButton()
@@ -57,6 +57,7 @@ class CTVideoControlsMixin:
             target_circle_color=(
                 self.target_circle_color.property("video_color")
             ),
+            target_optical_resolution=self._target_optical_resolution,
             background_color=(
                 self.video_background_color.property("video_color")
             ),
@@ -70,6 +71,7 @@ class CTVideoControlsMixin:
 
     def _set_video_display_controls(self, settings):
         values = CompactConnectVideoDisplaySettings.from_mapping(settings)
+        self._target_optical_resolution = values.target_optical_resolution
         controls = (
             (self.video_red_gain, values.red_gain),
             (self.video_green_gain, values.green_gain),
@@ -153,12 +155,24 @@ class CTVideoControlsMixin:
             self.compactconnect_video_gain.setEnabled(
                 supported and self.video_view.worker is not None
             )
-            if current is not None:
+            gain_response_is_current = (
+                operation == "video_gain_apply"
+                and gain.get("requested") == self._latest_vendor_gain_request
+            )
+            gain_read_is_current = (
+                operation == "read"
+                and self._latest_vendor_gain_request is None
+            )
+            if current is not None and (
+                gain_response_is_current or gain_read_is_current
+            ):
                 blocked = self.compactconnect_video_gain.blockSignals(True)
                 try:
                     self.compactconnect_video_gain.setValue(int(current))
                 finally:
                     self.compactconnect_video_gain.blockSignals(blocked)
+            if gain_response_is_current:
+                self._latest_vendor_gain_request = None
             if not supported:
                 text = "Unavailable"
             elif applied is True:
@@ -181,7 +195,18 @@ class CTVideoControlsMixin:
             self.compactconnect_anti_flicker.setEnabled(
                 supported and self.video_view.worker is not None
             )
-            if current is not None:
+            anti_response_is_current = (
+                operation == "anti_flicker_apply"
+                and anti.get("requested")
+                == self._latest_vendor_anti_flicker_request
+            )
+            anti_read_is_current = (
+                operation == "read"
+                and self._latest_vendor_anti_flicker_request is None
+            )
+            if current is not None and (
+                anti_response_is_current or anti_read_is_current
+            ):
                 blocked = self.compactconnect_anti_flicker.blockSignals(True)
                 try:
                     index = self.compactconnect_anti_flicker.findData(int(current))
@@ -189,6 +214,8 @@ class CTVideoControlsMixin:
                         self.compactconnect_anti_flicker.setCurrentIndex(index)
                 finally:
                     self.compactconnect_anti_flicker.blockSignals(blocked)
+            if anti_response_is_current:
+                self._latest_vendor_anti_flicker_request = None
             display = anti.get("display")
             if not supported:
                 text = "Unavailable"
@@ -204,13 +231,6 @@ class CTVideoControlsMixin:
             self.compactconnect_anti_flicker.setToolTip(detail)
 
         worker_running = self.video_view.worker is not None
-        self.write_video_gain_button.setEnabled(
-            worker_running and self.compactconnect_video_gain_supported
-        )
-        self.write_anti_flicker_button.setEnabled(
-            worker_running and self.compactconnect_anti_flicker_supported
-        )
-
         if operation == "video_gain_apply":
             result = gain or {}
             message = (
@@ -251,7 +271,7 @@ class CTVideoControlsMixin:
         )
         return True
 
-    def apply_compactconnect_video_gain(self):
+    def apply_compactconnect_video_gain(self, _value=None):
         if self.video_view.worker is None:
             self.log("Video gain write skipped: video is not running")
             return False
@@ -259,34 +279,18 @@ class CTVideoControlsMixin:
             self.log("Video gain write skipped: vendor YTarget is unavailable")
             return False
         value = self.compactconnect_video_gain.value()
-        answer = QMessageBox.warning(
-            self,
-            "Write Persistent Camera Gain",
-            "This writes CompactConnect Video Gain (YTarget) to the camera's "
-            "persistent EEPROM. CompactConnect also updates related tuning "
-            "bytes during this operation.\n\n"
-            f"Write value {value}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self.log("CompactConnect Video Gain write cancelled")
-            return False
-        if not self.video_view.set_compactconnect_video_gain(
-            value, confirmed=True
-        ):
+        self._latest_vendor_gain_request = value
+        if not self.video_view.set_compactconnect_video_gain(value):
+            self._latest_vendor_gain_request = None
             self.log("Video gain write skipped: video is not running")
             return False
-        self.write_video_gain_button.setEnabled(False)
         self.camera_status_label.setText(
             f"Writing CompactConnect Video Gain {value}; awaiting read-back..."
         )
-        self.log(
-            f"CompactConnect Video Gain {value} queued after EEPROM confirmation"
-        )
+        self.log(f"CompactConnect Video Gain {value} queued immediately")
         return True
 
-    def apply_compactconnect_anti_flicker(self):
+    def apply_compactconnect_anti_flicker(self, _index=None):
         if self.video_view.worker is None:
             self.log("Anti-flicker write skipped: video is not running")
             return False
@@ -295,29 +299,13 @@ class CTVideoControlsMixin:
             return False
         mode = int(self.compactconnect_anti_flicker.currentData())
         label = self.compactconnect_anti_flicker.currentText()
-        answer = QMessageBox.warning(
-            self,
-            "Write Persistent Anti-flicker",
-            "This writes the CompactConnect Anti-flicker value to persistent "
-            "camera EEPROM. Off and 50 Hz both use raw value 25, so those two "
-            "states cannot be distinguished by read-back.\n\n"
-            f"Write {label}?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            self.log("CompactConnect Anti-flicker write cancelled")
-            return False
-        if not self.video_view.set_compactconnect_anti_flicker(
-            mode, confirmed=True
-        ):
+        self._latest_vendor_anti_flicker_request = mode
+        if not self.video_view.set_compactconnect_anti_flicker(mode):
+            self._latest_vendor_anti_flicker_request = None
             self.log("Anti-flicker write skipped: video is not running")
             return False
-        self.write_anti_flicker_button.setEnabled(False)
         self.camera_status_label.setText(
             f"Writing CompactConnect Anti-flicker {label}; awaiting read-back..."
         )
-        self.log(
-            f"CompactConnect Anti-flicker {label} queued after EEPROM confirmation"
-        )
+        self.log(f"CompactConnect Anti-flicker {label} queued immediately")
         return True

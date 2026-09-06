@@ -6,6 +6,7 @@ import numpy as np
 
 from plugins.devices.ctvideo_3m.video_display import (
     CompactConnectVideoDisplaySettings,
+    _target_circle_diameter,
     canonical_video_display_profile,
     process_frame,
 )
@@ -24,6 +25,7 @@ SOFTWARE_DISPLAY_KEYS = {
     "target_circle_style",
     "target_circle_width",
     "target_circle_color",
+    "target_optical_resolution",
     "background_color",
     "background_circle_color",
     "background_circle_diameter",
@@ -42,7 +44,7 @@ class _CV2WithoutOverlay:
 
 
 class CompactConnectVideoDisplayModelTests(unittest.TestCase):
-    def test_profile_schema_contains_only_the_fourteen_software_settings(self):
+    def test_profile_schema_contains_only_the_software_settings(self):
         settings = CompactConnectVideoDisplaySettings()
 
         self.assertEqual(set(settings.to_dict()), SOFTWARE_DISPLAY_KEYS)
@@ -65,6 +67,7 @@ class CompactConnectVideoDisplayModelTests(unittest.TestCase):
             "target_circle_style": "dotted",
             "target_circle_width": 3,
             "target_circle_color": "#123456",
+            "target_optical_resolution": 100,
             "background_color": "#234567",
             "background_circle_color": "#345678",
             "background_circle_diameter": 420,
@@ -126,6 +129,8 @@ class CompactConnectVideoDisplayModelTests(unittest.TestCase):
             ("rotation_deg", 360),
             ("target_circle_width", -1),
             ("target_circle_width", 26),
+            ("target_optical_resolution", -1),
+            ("target_optical_resolution", 1001),
             ("background_circle_diameter", 99),
             ("background_circle_diameter", 1201),
             ("target_circle_style", "dash-dot"),
@@ -140,6 +145,12 @@ class CompactConnectVideoDisplayModelTests(unittest.TestCase):
 class CompactConnectVideoDisplayProcessorTests(unittest.TestCase):
     def setUp(self):
         self.cv2_without_overlay = _CV2WithoutOverlay()
+
+    def test_target_circle_uses_detected_optical_resolution_and_camera_fov(self):
+        self.assertEqual(_target_circle_diameter(480, 60), 191)
+        self.assertEqual(_target_circle_diameter(480, 100), 115)
+        self.assertEqual(_target_circle_diameter(480, 300), 38)
+        self.assertEqual(_target_circle_diameter(480, 0), 80)
 
     @staticmethod
     def settings(**changes):
@@ -279,27 +290,25 @@ class CTVideoDisplayWorkerContractTests(unittest.TestCase):
         self.assertIsNone(anti_flicker)
         self.assertFalse(read_requested)
 
-    def test_persistent_worker_writes_require_confirmation_and_valid_values(self):
+    def test_persistent_worker_writes_queue_immediately_with_valid_values(self):
         worker = CTVideoWorker(
             source=0,
             camera_name="offline persistent write safety test",
         )
 
-        with self.assertRaises(PermissionError):
-            worker.set_compactconnect_video_gain(180)
-        with self.assertRaises(PermissionError):
-            worker.set_compactconnect_anti_flicker(0)
+        worker.set_compactconnect_video_gain(180)
+        worker.set_compactconnect_anti_flicker(0)
         with self.assertRaises(ValueError):
-            worker.set_compactconnect_video_gain(256, confirmed=True)
+            worker.set_compactconnect_video_gain(256)
         with self.assertRaises(ValueError):
-            worker.set_compactconnect_anti_flicker(3, confirmed=True)
+            worker.set_compactconnect_anti_flicker(3)
 
         display, video_gain, anti_flicker, read_requested = (
             worker._take_requests()
         )
         self.assertIsNone(display)
-        self.assertIsNone(video_gain)
-        self.assertIsNone(anti_flicker)
+        self.assertEqual(video_gain, 180)
+        self.assertEqual(anti_flicker, 0)
         self.assertFalse(read_requested)
 
 

@@ -66,11 +66,31 @@ class CalibrationProtocolError(RuntimeError):
     """Raised when a SET echo or read-back does not match the protocol."""
 
 
+@dataclass(frozen=True)
+class SensorInformation:
+    """Read-only model and optical information reported by the pyrometer."""
+
+    model_word: int
+    minimum_temperature_C: float
+    maximum_temperature_C: float
+    model_name: str | None
+    optical_resolution: int | None
+
+
 class CTVideo3M:
     OBJECT_TEMP = 0x01
     HEAD_TEMP = 0x02
     BOX_TEMP = 0x03
     ACTUAL_TEMP = 0x81
+    READ_SENSOR_INFORMATION = 0x45
+
+    MODEL_OPTICS_BY_RANGE = {
+        (50.0, 400.0): ("CTvideo 3ML", 60),
+        (100.0, 600.0): ("CTvideo 3MH", 100),
+        (150.0, 1000.0): ("CTvideo 3MH1", 300),
+        (200.0, 1500.0): ("CTvideo 3MH2", 300),
+        (250.0, 1800.0): ("CTvideo 3MH3", 300),
+    }
 
     READ_TWEAK_OFFSET = 0x26
     READ_TWEAK_GAIN = 0x27
@@ -93,7 +113,10 @@ class CTVideo3M:
         ),
     )
 
-    def __init__(self, port: str = "COM6", *, transport=None):
+    def __init__(
+        self, port: str = "COM6", *, transport=None,
+        baudrate: int = 115200, timeout: float = 0.5,
+    ):
         """Create the protocol driver over pyserial or an injected transport.
 
         ``transport`` must expose the small serial-like API used below. This
@@ -108,11 +131,11 @@ class CTVideo3M:
             )
         self.ser = transport if transport is not None else serial.Serial(
             port=port,
-            baudrate=115200,
+            baudrate=int(baudrate),
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
-            timeout=0.5,
+            timeout=float(timeout),
             xonxoff=False,
             rtscts=False,
             dsrdtr=False,
@@ -270,6 +293,33 @@ class CTVideo3M:
     def read_firmware_revision(self) -> int:
         return self._u16(self.query_bytes(0x0F, 2))
 
+    @staticmethod
+    def decode_protocol_temperature(raw: int) -> float:
+        return (int(raw) - 1000) / 10.0
+
+    def read_sensor_information(self) -> SensorInformation:
+        """Read model word/range and map CTvideo 3M optics from its range."""
+        data = self.query_bytes(self.READ_SENSOR_INFORMATION, 6)
+        model_word = self._u16(data[0:2])
+        minimum = self.decode_protocol_temperature(self._u16(data[2:4]))
+        maximum = self.decode_protocol_temperature(self._u16(data[4:6]))
+        model_name = None
+        optical_resolution = None
+        for (known_minimum, known_maximum), model in self.MODEL_OPTICS_BY_RANGE.items():
+            if (
+                math.isclose(minimum, known_minimum, abs_tol=0.05)
+                and math.isclose(maximum, known_maximum, abs_tol=0.05)
+            ):
+                model_name, optical_resolution = model
+                break
+        return SensorInformation(
+            model_word=model_word,
+            minimum_temperature_C=minimum,
+            maximum_temperature_C=maximum,
+            model_name=model_name,
+            optical_resolution=optical_resolution,
+        )
+
     def read_tweak_offset(self) -> float:
         raw = self._u16(self.query_bytes(self.READ_TWEAK_OFFSET, 2))
         return self.decode_tweak_offset(raw)
@@ -409,13 +459,18 @@ class CTVideo3M:
             )
 
     def read_settings(self):
-        return {
+        settings = {
             "emissivity": self.read_emissivity(),
             "transmission": self.read_transmission(),
             "average_time_s": self.read_average_time(),
             "smart_averaging": self.read_smart_averaging(),
             "peak_hold_s": self.read_peak_hold_time(),
         }
+        try:
+            settings["sensor_information"] = self.read_sensor_information()
+        except Exception as error:
+            settings["sensor_information_error"] = str(error)
+        return settings
 
     def read_all(self):
         return {

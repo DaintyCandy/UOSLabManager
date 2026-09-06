@@ -6,15 +6,11 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QSizePolicy,
-    QTextEdit, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMessageBox, QPushButton, QSizePolicy, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from plugins.devices.ctvideo_3m.video import CTVideoView
-from plugins.devices.ctvideo_3m.connection import create_ctvideo, default_connection
-from plugins.devices.ctvideo_3m.usb_camera import resolve_camera_for_port
-from plugins.devices.zup36_12.driver import ZUP36_12
-from gui.widget_busy_spinner import run_busy_task
 
 
 class HeatingPIDWorker(QThread):
@@ -255,7 +251,6 @@ class HeatingControlPanel(QWidget):
         super().__init__(parent)
         self.manager = manager
         self.main_window = parent
-        self.owned_devices = set()
         self.started_at = time.monotonic()
         self.last_updates = {"CTVIDEO3M": None, "ZUP": None}
         self.times = []
@@ -278,83 +273,98 @@ class HeatingControlPanel(QWidget):
         layout = QGridLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
-        layout.addWidget(self._build_connections_and_log(), 0, 0)
-        layout.addWidget(self._build_pyrometer_view(), 0, 1)
-        layout.addWidget(self._build_control_settings(), 1, 0)
-        layout.addWidget(self._build_graph(), 1, 1)
-        layout.setRowStretch(0, 1)
+        self.status_panel = self._build_connections_and_log()
+        self.pyrometer_panel = self._build_pyrometer_view()
+        self.graph_panel = self._build_graph()
+        self.heating_panel = self._build_control_settings()
+        top_height = max(
+            self.status_panel.sizeHint().height(),
+            self.heating_panel.sizeHint().height(),
+        )
+        for top_panel in (self.status_panel, self.heating_panel):
+            top_panel.setFixedHeight(top_height)
+        for bottom_panel in (self.graph_panel, self.pyrometer_panel):
+            bottom_panel.setMinimumSize(0, 0)
+            bottom_panel.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+            )
+        layout.addWidget(self.status_panel, 0, 0)
+        layout.addWidget(self.heating_panel, 0, 1)
+        layout.addWidget(self.graph_panel, 1, 0)
+        layout.addWidget(self.pyrometer_panel, 1, 1)
+        layout.setRowStretch(0, 0)
         layout.setRowStretch(1, 1)
         layout.setColumnStretch(0, 1)
         layout.setColumnStretch(1, 1)
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(0, 0)
         self.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
 
     def _build_connections_and_log(self):
-        panel = QGroupBox("Devices / Measurements")
-        layout = QHBoxLayout(panel)
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        panel = QGroupBox("Device Status")
+        self.status_layout = QGridLayout(panel)
+        self.status_layout.setContentsMargins(6, 6, 6, 6)
+        self.status_layout.setSpacing(4)
+        self.connection_status_panel = QWidget()
+        connection_layout = QVBoxLayout(self.connection_status_panel)
+        connection_layout.setContentsMargins(0, 0, 0, 0)
         connection_grid = QGridLayout()
         connection_grid.addWidget(QLabel("Device"), 0, 0)
-        connection_grid.addWidget(QLabel("Port"), 0, 1)
-        connection_grid.addWidget(QLabel("Status"), 0, 2)
+        connection_grid.addWidget(QLabel("Connection"), 0, 1)
 
-        self.zup_port = QLineEdit("COM4")
         self.zup_status = QLabel("Disconnected")
-        self.zup_button = QPushButton("Connect")
-        self.zup_button.clicked.connect(self.toggle_zup)
-        self.zup_settings_button = QPushButton("Settings")
-        self.zup_settings_button.clicked.connect(
-            lambda: self.open_device_settings("ZUP")
-        )
         connection_grid.addWidget(QLabel("ZUP 36-12"), 1, 0)
-        connection_grid.addWidget(self.zup_port, 1, 1)
-        connection_grid.addWidget(self.zup_status, 1, 2)
-        connection_grid.addWidget(self.zup_button, 1, 3)
-        connection_grid.addWidget(self.zup_settings_button, 1, 4)
+        connection_grid.addWidget(self.zup_status, 1, 1)
 
-        self.ctvideo_port = QLineEdit(default_connection())
         self.ctvideo_status = QLabel("Disconnected")
-        self.ctvideo_button = QPushButton("Connect")
-        self.ctvideo_button.clicked.connect(self.toggle_ctvideo)
-        self.ctvideo_settings_button = QPushButton("Settings")
-        self.ctvideo_settings_button.clicked.connect(
-            lambda: self.open_device_settings("CTVIDEO3M")
-        )
         connection_grid.addWidget(QLabel("CTvideo 3M"), 2, 0)
-        connection_grid.addWidget(self.ctvideo_port, 2, 1)
-        connection_grid.addWidget(self.ctvideo_status, 2, 2)
-        connection_grid.addWidget(self.ctvideo_button, 2, 3)
-        connection_grid.addWidget(self.ctvideo_settings_button, 2, 4)
+        connection_grid.addWidget(self.ctvideo_status, 2, 1)
+        connection_grid.setColumnStretch(0, 1)
         connection_grid.setColumnStretch(1, 1)
-        left_layout.addLayout(connection_grid)
+        connection_layout.addLayout(connection_grid)
 
+        connection_layout.addStretch()
+        self.status_layout.addWidget(self.connection_status_panel, 0, 0)
+
+        self.log_group = QGroupBox("Log")
+        self.log_group.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        log_layout = QVBoxLayout(self.log_group)
+        log_layout.setContentsMargins(6, 6, 6, 6)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.document().setMaximumBlockCount(2000)
+        self.log_box.setMinimumSize(0, 0)
+        self.log_box.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
         self.log_box.setStyleSheet(
             "background:#000; color:#0f0; font-family:monospace;"
         )
-        left_layout.addWidget(self.log_box, 1)
-        layout.addWidget(left, 1)
+        log_layout.addWidget(self.log_box)
+        self.status_layout.addWidget(self.log_group, 1, 0)
 
-        measurements = QGroupBox("Live Values / Graph Selection")
-        measurement_grid = QGridLayout(measurements)
+        self.measurements_panel = QGroupBox("Values")
+        measurement_grid = QGridLayout(self.measurements_panel)
+        measurement_grid.setContentsMargins(6, 6, 6, 6)
+        measurement_grid.setSpacing(6)
         self.value_buttons = {}
         value_definitions = (
-            ("temperature", "Temperature", "°C", "#ff7043"),
-            ("voltage", "Voltage", "V", "#42a5f5"),
-            ("current", "Current", "A", "#66bb6a"),
-            ("power", "Power", "W", "#ab47bc"),
+            ("temperature", "Temp", "°C", "#ff7043"),
+            ("voltage", "Vol", "V", "#42a5f5"),
+            ("current", "Cur", "A", "#66bb6a"),
+            ("power", "Pow", "W", "#ab47bc"),
         )
         for index, (key, title, unit, color) in enumerate(value_definitions):
             button = QPushButton(f"{title}\n-")
             button.setCheckable(True)
             button.setChecked(True)
-            button.setMinimumSize(95, 66)
+            button.setMinimumSize(0, 0)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding
+            )
             button.setProperty("value_title", title)
             button.setProperty("value_unit", unit)
             button.setStyleSheet(
@@ -367,36 +377,61 @@ class HeatingControlPanel(QWidget):
             button.toggled.connect(
                 lambda checked, name=key: self.set_curve_visible(name, checked)
             )
-            measurement_grid.addWidget(button, index, 0)
+            row, column = divmod(index, 2)
+            measurement_grid.addWidget(button, row, column)
+            measurement_grid.setRowStretch(row, 1)
+            measurement_grid.setColumnStretch(column, 1)
             self.value_buttons[key] = button
-        measurement_grid.setColumnStretch(0, 1)
-        layout.addWidget(measurements, 1)
+        self.status_layout.addWidget(self.measurements_panel, 0, 1, 2, 1)
+        self.status_layout.setRowStretch(1, 1)
+        self.status_layout.setColumnStretch(0, 1)
+        self.status_layout.setColumnStretch(1, 1)
         return panel
 
     def _build_pyrometer_view(self):
         panel = QGroupBox("Pyrometer")
         layout = QVBoxLayout(panel)
-        self.video_view = CTVideoView(self.log)
+        self.video_view = CTVideoView(
+            self.log,
+            camera_workspace=getattr(self.main_window, "camera_panel", None),
+        )
+        self.video_view.setMinimumSize(0, 0)
+        self.video_view.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
+        self.video_view.preview.setMinimumSize(0, 0)
+        self.video_view.preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
         layout.addWidget(self.video_view, 1)
         return panel
 
     def _build_control_settings(self):
         group = QGroupBox("Heating Control")
         layout = QVBoxLayout(group)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(0)
         layout.addWidget(self._build_heating_settings())
         return group
 
     def _build_heating_settings(self):
         panel = QWidget()
         layout = QGridLayout(panel)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setHorizontalSpacing(4)
+        layout.setVerticalSpacing(3)
 
         target_group = QGroupBox("Temperature Target")
         target_form = QFormLayout(target_group)
+        target_form.setContentsMargins(6, 8, 6, 4)
+        target_form.setHorizontalSpacing(4)
+        target_form.setVerticalSpacing(3)
+        target_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.target_temperature = self._spin(-50.0, 2000.0, 300.0, 1, " °C")
         self.target_temperature.editingFinished.connect(
             self.apply_running_setpoint
         )
-        self.apply_setpoint_button = QPushButton("Apply Setpoint")
+        self.apply_setpoint_button = QPushButton("Apply")
         self.apply_setpoint_button.clicked.connect(
             lambda _checked=False: self.apply_running_setpoint()
         )
@@ -404,34 +439,60 @@ class HeatingControlPanel(QWidget):
         target_row = QHBoxLayout()
         target_row.addWidget(self.target_temperature, 1)
         target_row.addWidget(self.apply_setpoint_button)
-        target_form.addRow("Target temperature (live)", target_row)
-        target_form.addRow("Safety temperature", self.max_temperature)
+        target_form.addRow("Target", target_row)
+        target_form.addRow("Safety limit", self.max_temperature)
 
         ramp_group = QGroupBox("Current Ramp")
         ramp_form = QFormLayout(ramp_group)
+        ramp_form.setContentsMargins(6, 8, 6, 4)
+        ramp_form.setHorizontalSpacing(4)
+        ramp_form.setVerticalSpacing(3)
+        ramp_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.current_ramp_enabled = QCheckBox("Enabled")
         self.current_ramp_enabled.setChecked(True)
         self.current_ramp_rate = self._spin(0.001, 12.0, 0.1, 3, " A/s")
-        ramp_form.addRow("Current ramp", self.current_ramp_enabled)
-        ramp_form.addRow("Rise / fall rate", self.current_ramp_rate)
+        ramp_form.addRow("Enabled", self.current_ramp_enabled)
+        ramp_form.addRow("Rate", self.current_ramp_rate)
 
         pid_group = QGroupBox("PID")
-        pid_form = QFormLayout(pid_group)
+        pid_form = QGridLayout(pid_group)
+        pid_form.setContentsMargins(6, 8, 6, 4)
+        pid_form.setHorizontalSpacing(4)
+        pid_form.setVerticalSpacing(2)
         self.pid_p = self._spin(0.0, 1000.0, 4.0, 4)
         self.pid_i = self._spin(0.0, 1000.0, 3.0, 4)
         self.pid_d = self._spin(0.0, 1000.0, 3.0, 4)
-        pid_form.addRow("P [W/°C]", self.pid_p)
-        pid_form.addRow("I [W/(°C·s)]", self.pid_i)
-        pid_form.addRow("D [W·s/°C]", self.pid_d)
+        for column, (label, control) in enumerate((
+            ("P", self.pid_p), ("I", self.pid_i), ("D", self.pid_d),
+        )):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+            pid_form.addWidget(QLabel(label), 0, column)
+            pid_form.addWidget(control, 1, column)
+            pid_form.setColumnStretch(column, 1)
 
         limit_group = QGroupBox("Output Limits")
-        limit_form = QFormLayout(limit_group)
+        limit_form = QGridLayout(limit_group)
+        limit_form.setContentsMargins(6, 8, 6, 4)
+        limit_form.setHorizontalSpacing(4)
+        limit_form.setVerticalSpacing(2)
         self.control_voltage_limit = self._spin(0.0, 36.0, 12.0, 2, " V")
         self.control_current_limit = self._spin(0.0, 12.0, 1.0, 3, " A")
         self.control_power_limit = self._spin(0.0, 432.0, 12.0, 2, " W")
-        limit_form.addRow("Voltage limit", self.control_voltage_limit)
-        limit_form.addRow("Current limit", self.control_current_limit)
-        limit_form.addRow("Power limit", self.control_power_limit)
+        for column, (label, control) in enumerate((
+            ("Voltage", self.control_voltage_limit),
+            ("Current", self.control_current_limit),
+            ("Power", self.control_power_limit),
+        )):
+            control.setMinimumWidth(0)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+            )
+            limit_form.addWidget(QLabel(label), 0, column)
+            limit_form.addWidget(control, 1, column)
+            limit_form.setColumnStretch(column, 1)
 
         layout.addWidget(target_group, 0, 0)
         layout.addWidget(ramp_group, 0, 1)
@@ -440,10 +501,13 @@ class HeatingControlPanel(QWidget):
         for column in range(2):
             layout.setColumnStretch(column, 1)
 
-        controls = QVBoxLayout()
+        controls = QGridLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(4)
         self.control_status = QLabel("Stopped")
         self.control_status.setStyleSheet("font-weight:bold; color:#e74c3c;")
         self.control_output_label = QLabel("Power command: - / Current command: -")
+        self.control_output_label.setWordWrap(True)
         self.control_button = QPushButton("Start Heating Control")
         self.control_button.setStyleSheet(
             "background:#1f8f4e; color:white; font-weight:bold;"
@@ -456,10 +520,10 @@ class HeatingControlPanel(QWidget):
             self.control_voltage_limit, self.control_current_limit,
             self.control_power_limit,
         )
-        controls.addWidget(self.control_status)
-        controls.addWidget(self.control_output_label)
-        controls.addStretch()
-        controls.addWidget(self.control_button)
+        controls.addWidget(self.control_status, 0, 0)
+        controls.addWidget(self.control_output_label, 0, 1)
+        controls.addWidget(self.control_button, 0, 2)
+        controls.setColumnStretch(1, 1)
         layout.addLayout(controls, 2, 0, 1, 2)
         return panel
 
@@ -467,6 +531,10 @@ class HeatingControlPanel(QWidget):
         group = QGroupBox("Heating Graph")
         layout = QVBoxLayout(group)
         self.plot = pg.PlotWidget()
+        self.plot.setMinimumSize(0, 0)
+        self.plot.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setLabel("left", "Measured value")
         self.plot.showGrid(x=True, y=True, alpha=0.25)
@@ -508,121 +576,6 @@ class HeatingControlPanel(QWidget):
         control.setValue(value)
         control.setSuffix(suffix)
         return control
-
-    def toggle_zup(self):
-        if self.manager.get_device("ZUP") is None:
-            self.connect_zup()
-        else:
-            self.disconnect_zup()
-
-    def connect_zup(self):
-        port = self.zup_port.text().strip()
-
-        def connect():
-            self.manager.add_device("ZUP", lambda: ZUP36_12(port), interval=0.5)
-
-        def connected(_result):
-            self.owned_devices.add("ZUP")
-            self.log(f"ZUP 36-12 connected: {port}")
-            self._notify_main()
-
-        def failed(error):
-            self.show_error("ZUP 36-12", error)
-
-        run_busy_task(
-            self, connect, connected, failed,
-            key="zup_connection",
-        )
-
-    def disconnect_zup(self):
-        if self.control_active:
-            self.stop_control(wait=True)
-        device = self.manager.get_device("ZUP")
-        if device is not None:
-            errors = self._reset_zup_output(device)
-            if errors:
-                self.log(f"ZUP safe-reset warning: {'; '.join(errors)}")
-        self.manager.remove_device("ZUP")
-        self.owned_devices.discard("ZUP")
-        self.log("ZUP 36-12 disconnected")
-        self._notify_main()
-
-    def toggle_ctvideo(self):
-        if (
-            self.manager.get_device("CTVIDEO3M") is None
-            or self.video_view.worker is None
-        ):
-            self.connect_ctvideo()
-        else:
-            self.disconnect_ctvideo()
-
-    def connect_ctvideo(self):
-        port = self.ctvideo_port.text().strip()
-
-        def connect():
-            created_device = False
-            connection_port = port
-            if self.manager.get_device("CTVIDEO3M") is None:
-                self.manager.add_device(
-                    "CTVIDEO3M",
-                    lambda: create_ctvideo(connection_port, verify=True),
-                    interval=0.1,
-                )
-                created_device = True
-            else:
-                connection_port = self.manager.get_device("CTVIDEO3M").get_port()
-            try:
-                camera = resolve_camera_for_port(connection_port)
-            except Exception as camera_error:
-                camera = {
-                    "CameraIndex": 1,
-                    "CameraName": "CTvideo OpenCV fallback",
-                }
-                return created_device, connection_port, camera, camera_error
-            return created_device, connection_port, camera, None
-
-        def connected(result):
-            created_device, connected_port, camera, camera_error = result
-            if created_device:
-                self.owned_devices.add("CTVIDEO3M")
-            else:
-                self.log("Using the existing CTvideo 3M serial connection")
-            self.ctvideo_port.setText(connected_port)
-            if camera_error is not None:
-                self.log(
-                    f"Camera mapping failed ({camera_error}); "
-                    "starting automatic OpenCV source recovery."
-                )
-            if not self.video_view.start_preview(
-                camera["CameraIndex"], camera["CameraName"], camera_info=camera
-            ):
-                raise RuntimeError("The CTvideo camera thread did not start.")
-            self.log(f"CTvideo 3M connected: {connected_port}")
-            self._notify_main()
-
-        def failed(error):
-            self.video_view.stop_preview()
-            if "CTVIDEO3M" in self.owned_devices:
-                self.manager.remove_device("CTVIDEO3M")
-                self.owned_devices.discard("CTVIDEO3M")
-            self.show_error("CTvideo 3M", error)
-
-        run_busy_task(
-            self, connect, connected, failed,
-            key="ctvideo_connection",
-        )
-
-    def disconnect_ctvideo(self):
-        if self.control_active:
-            self.stop_control(wait=True)
-        self.video_view.stop_preview()
-        if "CTVIDEO3M" in self.owned_devices:
-            self.manager.remove_device("CTVIDEO3M")
-            self.owned_devices.discard("CTVIDEO3M")
-            self.log("CTvideo 3M disconnected")
-        else:
-            self.log("Detached from the shared CTvideo 3M preview")
-        self._notify_main()
 
     def execute_sequence_command(self, command, value):
         if command == "ramp_to_setpoint":
@@ -838,11 +791,9 @@ class HeatingControlPanel(QWidget):
         for device_id, display_name in (
             ("ZUP", "ZUP 36-12"), ("CTVIDEO3M", "CTvideo 3M"),
         ):
-            if device_id not in self.owned_devices:
+            connected = self.manager.get_device(device_id) is not None
+            if not self.connection_states.get(device_id, False) or connected:
                 continue
-            if self.manager.get_device(device_id) is not None:
-                continue
-            self.owned_devices.discard(device_id)
             error = self.manager.get_metrics(device_id).get("error")
             self.log(
                 f"{display_name} connection lost"
@@ -854,48 +805,16 @@ class HeatingControlPanel(QWidget):
                 self.video_view.stop_preview()
 
     def sync_connection_status(self):
-        self._sync_device_widgets(
-            "ZUP", self.zup_status, self.zup_button, self.zup_port
-        )
-        self._sync_device_widgets(
-            "CTVIDEO3M", self.ctvideo_status, self.ctvideo_button,
-            self.ctvideo_port,
-        )
+        self._sync_device_status("ZUP", self.zup_status)
+        self._sync_device_status("CTVIDEO3M", self.ctvideo_status)
 
-    def _sync_device_widgets(self, device_id, status, button, port):
-        device = self.manager.get_device(device_id)
-        connected = device is not None
-        if connected and not self.connection_states.get(device_id, False):
-            try:
-                port.setText(device.get_port())
-            except Exception as error:
-                self.log(f"{device_id} port synchronization failed: {error}")
+    def _sync_device_status(self, device_id, status):
+        connected = self.manager.get_device(device_id) is not None
         self.connection_states[device_id] = connected
         status.setText("Connected" if connected else "Disconnected")
         status.setStyleSheet(
             f"color:{'#2ecc71' if connected else '#e74c3c'}; font-weight:bold;"
         )
-        preview_detached = (
-            device_id == "CTVIDEO3M"
-            and connected
-            and self.video_view.worker is None
-        )
-        button.setText(
-            "Show Video" if preview_detached
-            else ("Disconnect" if connected else "Connect")
-        )
-        button.setStyleSheet(
-            "color:white; font-weight:bold; background:"
-            + ("#c0392b;" if connected else "#1f8f4e;")
-        )
-        port.setEnabled(not connected)
-
-    def open_device_settings(self, device_id):
-        if self.main_window is None or not hasattr(
-            self.main_window, "open_device_tab"
-        ):
-            return
-        self.main_window.open_device_tab(device_id)
 
     def emergency_stop(self):
         was_active = self.control_active
@@ -927,9 +846,6 @@ class HeatingControlPanel(QWidget):
         self.refresh_timer.stop()
         self.emergency_stop()
         self.video_view.stop_preview()
-        for device_id in tuple(self.owned_devices):
-            self.manager.remove_device(device_id)
-        self.owned_devices.clear()
         self._notify_main()
 
     def _notify_main(self):

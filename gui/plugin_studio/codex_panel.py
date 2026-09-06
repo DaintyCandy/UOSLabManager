@@ -7,17 +7,21 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-from core.plugin_manager import validate_plugin_id
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QTextOption
+from core.plugin_manager import (
+    get_plugin_root, load_device_plugins, load_experiment_plugins,
+    validate_plugin_id,
+)
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QTextOption
 from PyQt6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMessageBox, QPushButton, QTextBrowser,
-    QTextEdit, QVBoxLayout, QWidget,
+    QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .codex_presentation import should_display_codex_log
@@ -338,6 +342,91 @@ class CodexWorker(QThread):
         return {"usage": str(usage)}
 
 
+class CodexAuthWorker(QThread):
+    """Run Codex account operations without blocking the Qt GUI thread."""
+
+    browser_login_requested = pyqtSignal(str)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, operation, credential=None, parent=None):
+        super().__init__(parent)
+        self.operation = operation
+        self.credential = credential
+        self.login_handle = None
+
+    def run(self):
+        try:
+            from openai_codex import Codex
+        except ImportError:
+            self.failed.emit(
+                "Codex SDK is not installed. Install the 'openai-codex' package."
+            )
+            return
+
+        try:
+            codex = CodexWorker._start_codex(Codex)
+            with codex:
+                if self.operation == "login_chatgpt":
+                    self.login_handle = codex.login_chatgpt()
+                    self.browser_login_requested.emit(self.login_handle.auth_url)
+                    result = self.login_handle.wait()
+                    if not result.success:
+                        raise RuntimeError(result.error or "ChatGPT login was cancelled.")
+                elif self.operation == "login_api_key":
+                    codex.login_api_key(self.credential or "")
+                elif self.operation == "logout":
+                    codex.logout()
+                elif self.operation != "status":
+                    raise ValueError(f"Unsupported authentication operation: {self.operation}")
+
+                self.completed.emit(self.account_info(codex.account(refresh_token=True)))
+        except Exception as error:
+            self.failed.emit(str(error))
+        finally:
+            self.credential = None
+            self.login_handle = None
+
+    def cancel(self):
+        handle = self.login_handle
+        if handle is not None:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+
+    @staticmethod
+    def account_info(response):
+        account = getattr(response, "account", None)
+        account = getattr(account, "root", account)
+        if account is None:
+            return {
+                "authenticated": False,
+                "method": None,
+                "label": "Not signed in",
+            }
+
+        method = getattr(account, "type", None)
+        method = getattr(method, "value", method)
+        if method == "chatgpt":
+            email = getattr(account, "email", None)
+            plan = getattr(account, "plan_type", None)
+            plan = getattr(plan, "value", plan)
+            details = [value for value in (email, plan) if value]
+            label = "ChatGPT" + (f" / {' / '.join(details)}" if details else "")
+        elif method == "apiKey":
+            label = "API key"
+        elif method == "amazonBedrock":
+            label = "Amazon Bedrock"
+        else:
+            label = str(method or "Signed in")
+        return {
+            "authenticated": True,
+            "method": method,
+            "label": label,
+        }
+
+
 class CodexPanel(QWidget):
     changes_applied = pyqtSignal(str, object)
     REASONING_LEVELS = ("low", "medium", "high", "xhigh", "max", "ultra")
@@ -353,11 +442,15 @@ class CodexPanel(QWidget):
         self.worker = None
         self.pending_request = None
         self.request_active = False
+        self.auth_worker = None
+        self.authenticated = False
+        self.auth_busy = False
         self.model_efforts = {
             "gpt-5.6-terra": "medium",
             "gpt-5.6-sol": "low",
         }
         self._build_ui()
+        self.refresh_auth()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -381,6 +474,25 @@ class CodexPanel(QWidget):
         header.addWidget(self.reasoning_combo)
         self._set_reasoning_for_model(self.current_model())
         layout.addLayout(header)
+
+        auth_row = QHBoxLayout()
+        self.auth_label = QLabel("Checking sign-in…")
+        self.auth_label.setWordWrap(True)
+        auth_row.addWidget(self.auth_label, 1)
+        self.login_button = QPushButton("Sign in with ChatGPT")
+        self.login_button.clicked.connect(self.login_chatgpt)
+        auth_row.addWidget(self.login_button)
+        self.api_key_button = QPushButton("API key")
+        self.api_key_button.clicked.connect(self.login_api_key)
+        auth_row.addWidget(self.api_key_button)
+        self.logout_button = QPushButton("Sign out")
+        self.logout_button.clicked.connect(self.logout)
+        auth_row.addWidget(self.logout_button)
+        self.refresh_auth_button = QPushButton("Refresh")
+        self.refresh_auth_button.clicked.connect(self.refresh_auth)
+        auth_row.addWidget(self.refresh_auth_button)
+        layout.addLayout(auth_row)
+
         self.status = QLabel("Select a plugin to start")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -427,6 +539,105 @@ class CodexPanel(QWidget):
         layout.addLayout(send_row)
         self.send_button.setEnabled(False)
         self._set_staging_state(False)
+        self._update_auth_controls()
+
+    def _update_send_enabled(self):
+        self.send_button.setEnabled(
+            self.plugin_dir is not None
+            and self.authenticated
+            and not self.auth_busy
+            and not self.request_active
+        )
+
+    def _update_auth_controls(self):
+        if not hasattr(self, "login_button"):
+            return
+        can_change_auth = not self.auth_busy and not self.request_active
+        self.login_button.setEnabled(can_change_auth and not self.authenticated)
+        self.api_key_button.setEnabled(can_change_auth and not self.authenticated)
+        self.logout_button.setEnabled(can_change_auth and self.authenticated)
+        self.refresh_auth_button.setEnabled(can_change_auth)
+        self._update_send_enabled()
+
+    def refresh_auth(self):
+        self._start_auth_operation("status", "Checking sign-in…")
+
+    def login_chatgpt(self):
+        self._start_auth_operation(
+            "login_chatgpt", "Waiting for ChatGPT sign-in in your browser…"
+        )
+
+    def login_api_key(self):
+        if self.auth_busy or self.request_active:
+            return
+        api_key, accepted = QInputDialog.getText(
+            self,
+            "Codex API key",
+            "OpenAI API key:",
+            QLineEdit.EchoMode.Password,
+        )
+        api_key = api_key.strip()
+        if not accepted or not api_key:
+            return
+        self._start_auth_operation(
+            "login_api_key", "Signing in with API key…", credential=api_key
+        )
+
+    def logout(self):
+        if self.auth_busy or self.request_active:
+            return
+        if QMessageBox.question(
+            self,
+            "Sign out of Codex",
+            "Sign out of Codex on this Windows account?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self._stop_worker()
+        self._start_auth_operation("logout", "Signing out…")
+
+    def _start_auth_operation(self, operation, message, credential=None):
+        if self.auth_busy or self.request_active:
+            return
+        self.auth_busy = True
+        self.auth_label.setText(message)
+        self._update_auth_controls()
+        self.auth_worker = CodexAuthWorker(operation, credential, self)
+        self.auth_worker.browser_login_requested.connect(self._open_login_browser)
+        self.auth_worker.completed.connect(self._auth_completed)
+        self.auth_worker.failed.connect(self._auth_failed)
+        self.auth_worker.finished.connect(self._auth_worker_finished)
+        self.auth_worker.start()
+
+    def _open_login_browser(self, auth_url):
+        if not QDesktopServices.openUrl(QUrl(auth_url)):
+            self._log("AUTH", "Could not open the default browser for sign-in.")
+            QMessageBox.warning(
+                self,
+                "Codex sign-in",
+                "The sign-in page could not be opened in the default browser.",
+            )
+
+    def _auth_completed(self, info):
+        self.authenticated = bool(info.get("authenticated"))
+        self.auth_label.setText(info.get("label") or "Not signed in")
+        category = "AUTH"
+        if self.authenticated:
+            self._log(category, f"Signed in: {info.get('label', 'Codex')}")
+        else:
+            self._stop_worker()
+            self._log(category, "Not signed in")
+
+    def _auth_failed(self, error):
+        self.authenticated = False
+        self.auth_label.setText("Sign-in status unavailable")
+        self._log("AUTH ERROR", error)
+
+    def _auth_worker_finished(self):
+        if self.auth_worker is not None:
+            self.auth_worker.deleteLater()
+            self.auth_worker = None
+        self.auth_busy = False
+        self._update_auth_controls()
 
     def _log(self, category, message):
         if not should_display_codex_log(category):
@@ -532,7 +743,7 @@ class CodexPanel(QWidget):
             self.plugin_kind = "device"
         self.log_view.clear()
         self._set_staging_state(False)
-        self.send_button.setEnabled(plugin_dir.is_dir())
+        self._update_send_enabled()
         self._update_selection_status()
         self._log("SYSTEM", f"Selected plugin: {plugin_dir.name}")
 
@@ -540,7 +751,7 @@ class CodexPanel(QWidget):
         self._stop_worker()
         self._clear_staging()
         self.plugin_dir = None
-        self.send_button.setEnabled(False)
+        self._update_send_enabled()
         self._set_staging_state(False)
         self.status.setText("Select a plugin to start")
         self.log_view.clear()
@@ -548,6 +759,13 @@ class CodexPanel(QWidget):
     def send_prompt(self):
         request = self.prompt.toPlainText().strip()
         if not request or self.plugin_dir is None or self.request_active:
+            return
+        if not self.authenticated:
+            QMessageBox.information(
+                self,
+                "Codex sign-in required",
+                "Sign in to Codex before sending a plugin editing request.",
+            )
             return
         if self.prepare_callback is not None and not self.prepare_callback():
             return
@@ -574,6 +792,7 @@ class CodexPanel(QWidget):
         self.model_combo.setEnabled(False)
         self.reasoning_combo.setEnabled(False)
         self.request_active = True
+        self._update_auth_controls()
         if self.worker is None or not self.worker.isRunning():
             self.pending_request = request
             self.worker = CodexWorker(
@@ -608,7 +827,7 @@ class CodexPanel(QWidget):
         self.request_active = False
         self.model_combo.setEnabled(True)
         self.reasoning_combo.setEnabled(True)
-        self.send_button.setEnabled(self.plugin_dir is not None)
+        self._update_auth_controls()
 
     def _codex_failed(self, error):
         self._log("CODEX ERROR", error)
@@ -616,7 +835,7 @@ class CodexPanel(QWidget):
         self.request_active = False
         self.model_combo.setEnabled(True)
         self.reasoning_combo.setEnabled(True)
-        self.send_button.setEnabled(self.plugin_dir is not None)
+        self._update_auth_controls()
 
     def _worker_finished(self):
         if self.worker is not None:
@@ -626,7 +845,7 @@ class CodexPanel(QWidget):
         self.request_active = False
         self.model_combo.setEnabled(True)
         self.reasoning_combo.setEnabled(True)
-        self.send_button.setEnabled(self.plugin_dir is not None)
+        self._update_auth_controls()
 
     def _update_usage(self, usage):
         flat = {}
@@ -745,7 +964,15 @@ class CodexPanel(QWidget):
             api_notes = (
                 "# UOSLabManager experiment plugin\n\n"
                 "Keep `plugin.json` and `plugin.py`. Panel plugins expose an "
-                "`ExperimentPlugin` object. Optional Sequence commands are declared "
+                "`ExperimentPlugin` object. The first panel-factory argument is an "
+                "`ExperimentContext`, not a raw MainWindow or an invented snapshot "
+                "service. Use `context.data.latest(device_id)`, "
+                "`context.data.metrics(device_id)`, "
+                "`context.cameras.frame_packet(index)`, and "
+                "`context.experiments.execute(id, command, value)`. Read every "
+                "relevant file in `_CONTEXT` and use only resource IDs listed in "
+                "`_CONTEXT/AVAILABLE_RESOURCES.json`; never guess host methods or "
+                "IDs. Optional Sequence commands are declared "
                 "with `SequenceCommand` in plugin.py and implemented by "
                 "`execute_sequence_command`, `is_sequence_command_complete`, and "
                 "`cancel_sequence_command` in panel.py. Run blocking work with "
@@ -769,6 +996,85 @@ class CodexPanel(QWidget):
         (self.staging_dir / "UI_STYLE_GUIDE.md").write_text(
             ui_style_guide, encoding="utf-8"
         )
+        self._write_reference_context()
+
+    def _write_reference_context(self):
+        """Expose the real host API to Codex without making it applyable."""
+        context_dir = self.staging_dir / "_CONTEXT"
+        context_dir.mkdir()
+        repository_root = Path(__file__).resolve().parents[2]
+        bundled_context_root = Path(
+            getattr(sys, "_MEIPASS", repository_root)
+        ) / "_codex_context"
+        references = (
+            "core/experiment_context.py",
+            "core/device_manager.py",
+            "core/plugin_manager.py",
+            "gui/panel_camera.py",
+        )
+        for relative_name in references:
+            source = bundled_context_root / relative_name
+            if not source.is_file():
+                source = repository_root / relative_name
+            if not source.is_file():
+                continue
+            target = context_dir / relative_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+        if self.plugin_kind == "experiment":
+            examples = context_dir / "examples"
+            for name in ("heating_control", "line_profile"):
+                source_dir = get_plugin_root() / "experiments" / name
+                if source_dir.is_dir() and source_dir.resolve() != self.plugin_dir.resolve():
+                    shutil.copytree(
+                        source_dir, examples / name,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+                    )
+
+        device_plugins = load_device_plugins(strict=False)
+        experiment_plugins = load_experiment_plugins(strict=False)
+        resources = {
+            "experiment_context_api_version": 1,
+            "devices": {
+                device_id: {
+                    "display_name": plugin.display_name,
+                    "data_columns": [
+                        {
+                            "key": column.key,
+                            "label": column.label,
+                            "unit": column.unit,
+                        }
+                        for column in plugin.columns
+                    ],
+                }
+                for device_id, plugin in device_plugins.items()
+            },
+            "cameras": [
+                {"index": 0, "name": "Camera 1"},
+                {"index": 1, "name": "Camera 2"},
+            ],
+            "experiments": {
+                experiment_id: {
+                    "display_name": plugin.display_name,
+                    "commands": [command.key for command in plugin.sequence_commands],
+                }
+                for experiment_id, plugin in experiment_plugins.items()
+            },
+        }
+        (context_dir / "AVAILABLE_RESOURCES.json").write_text(
+            json.dumps(resources, indent=2), encoding="utf-8"
+        )
+        (context_dir / "README.md").write_text(
+            "# Read-only host context\n\n"
+            "These files describe the actual UOSLabManager API. Read them before "
+            "editing. Never modify `_CONTEXT`, never invent methods or resource "
+            "IDs, and use only IDs listed in `AVAILABLE_RESOURCES.json`. New "
+            "experiment panels receive `ExperimentContext` as their first factory "
+            "argument. Prefer `context.devices`, `context.data`, "
+            "`context.cameras`, and `context.experiments`.\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def _read_editable_files(root):
@@ -788,6 +1094,11 @@ class CodexPanel(QWidget):
         files = self._read_editable_files(self.staging_dir)
         files.pop(Path("PLUGIN_API.md"), None)
         files.pop(Path("UI_STYLE_GUIDE.md"), None)
+        files = {
+            path: contents
+            for path, contents in files.items()
+            if not path.parts or path.parts[0] != "_CONTEXT"
+        }
         return files
 
     def _build_diff(self):
@@ -807,7 +1118,10 @@ class CodexPanel(QWidget):
         if self.staging_dir is None:
             return "No staged changes to validate."
         errors = []
-        python_files = list(self.staging_dir.rglob("*.py"))
+        python_files = [
+            path for path in self.staging_dir.rglob("*.py")
+            if "_CONTEXT" not in path.parts
+        ]
         for source_path in python_files:
             try:
                 ast.parse(source_path.read_text(encoding="utf-8"), str(source_path))
@@ -927,6 +1241,17 @@ class CodexPanel(QWidget):
         self.pending_request = None
         self.request_active = False
 
+    def _stop_auth_worker(self):
+        worker = self.auth_worker
+        if worker is None:
+            return
+        if worker.isRunning():
+            worker.cancel()
+            worker.wait(5000)
+        self.auth_worker = None
+        self.auth_busy = False
+
     def shutdown(self):
         self._stop_worker()
+        self._stop_auth_worker()
         self._clear_staging()

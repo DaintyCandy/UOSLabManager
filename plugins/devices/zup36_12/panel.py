@@ -185,7 +185,7 @@ class ZUP3612Panel(QWidget):
         panel = QWidget()
         form = QFormLayout(panel)
         self.baud_rate = QComboBox()
-        for value in (1200, 2400, 4800, 9600, 19200, 38400):
+        for value in (300, 600, 1200, 2400, 4800, 9600):
             self.baud_rate.addItem(str(value), value)
         self.baud_rate.setCurrentIndex(self.baud_rate.findData(9600))
 
@@ -229,7 +229,7 @@ class ZUP3612Panel(QWidget):
         self.write_timeout.setSuffix(" s")
 
         self.device_address = QSpinBox()
-        self.device_address.setRange(0, 31)
+        self.device_address.setRange(1, 31)
         self.device_address.setValue(1)
 
         self.connection_controls = (
@@ -271,18 +271,14 @@ class ZUP3612Panel(QWidget):
             connection_info = {}
 
             def create_device():
-                device = ZUP36_12(port, **settings)
+                device = ZUP36_12.connect_verified(port, **settings)
                 connection_info["model"] = device.get_model()
                 connection_info["identification_error"] = device.get_identification_error()
+                connection_info["settings"] = device.get_verified_settings()
                 return device
 
             self.manager.add_device("ZUP", create_device)
-            try:
-                connection_info["settings"] = self.get_device().read_settings()
-                return connection_info
-            except Exception:
-                self.manager.remove_device("ZUP")
-                raise
+            return connection_info
 
         def connected(connection_info):
             self._apply_device_settings(connection_info.pop("settings"))

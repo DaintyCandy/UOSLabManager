@@ -1,14 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 import glob
 import os
+import shutil
 import sys
 from importlib.metadata import PackageNotFoundError, distribution
 
-from PyInstaller.building.datastruct import Tree
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 hiddenimports = []
-hiddenimports += collect_submodules('plugins')
+hiddenimports += collect_submodules('serial')
 hiddenimports += collect_submodules('openai_codex')
 codex_datas, codex_binaries, codex_cli_hiddenimports = collect_all(
     'codex_cli_bin', include_py_files=True
@@ -56,6 +56,10 @@ a = Analysis(
         ('LICENSE', '.'),
         ('THIRD_PARTY_NOTICES.md', '.'),
         ('assets/uoslabmanager_icon.png', 'assets'),
+        ('core/experiment_context.py', '_codex_context/core'),
+        ('core/device_manager.py', '_codex_context/core'),
+        ('core/plugin_manager.py', '_codex_context/core'),
+        ('gui/panel_camera.py', '_codex_context/gui'),
         *third_party_license_files,
         *codex_datas,
     ],
@@ -67,7 +71,6 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
-a.datas += Tree('plugins', prefix='plugins', excludes=['__pycache__', '*.pyc'])
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -96,4 +99,12 @@ coll = COLLECT(
     upx=True,
     upx_exclude=[],
     name='UOSLabManager',
+)
+
+# Keep editable plug-ins visible beside UOSLabManager.exe instead of placing
+# them in PyInstaller's internal contents directory.
+external_plugin_dir = os.path.join(DISTPATH, 'UOSLabManager', 'plugins')
+shutil.copytree(
+    'plugins', external_plugin_dir, dirs_exist_ok=True,
+    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'),
 )

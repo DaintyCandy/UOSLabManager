@@ -43,9 +43,12 @@ class CTVideo3MPanel(
         self.last_plotted_update = None
         self.compactconnect_video_gain_supported = False
         self.compactconnect_anti_flicker_supported = False
+        self._latest_vendor_gain_request = None
+        self._latest_vendor_anti_flicker_request = None
         self.calibration_snapshot = None
         self._calibration_busy = False
         self._video_attach_attempted = False
+        self._target_optical_resolution = 0
         self.monitor_timer = QTimer(self)
         self.monitor_timer.timeout.connect(self.refresh_monitoring)
         self._build_ui()
@@ -61,6 +64,10 @@ class CTVideo3MPanel(
         root.addLayout(top)
 
         self.tabs = QTabWidget()
+        self.tabs.setMinimumSize(0, 0)
+        self.tabs.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored
+        )
         self.tabs.addTab(self._build_pyrometer_tab(), "Pyrometer")
         self.tabs.addTab(self._build_settings(), "Settings")
         self.tabs.addTab(self._build_calibration_tab(), "Calibration")
@@ -117,6 +124,10 @@ class CTVideo3MPanel(
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         graph_group = QGroupBox("Temperature Tracking")
+        graph_group.setMinimumSize(0, 0)
+        graph_group.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
         graph_layout = QVBoxLayout(graph_group)
         self.plot = pg.PlotWidget()
         self.plot.setLabel("left", "Temperature", units="°C")
@@ -132,9 +143,16 @@ class CTVideo3MPanel(
         splitter.addWidget(graph_group)
 
         right = QWidget()
+        right.setMinimumSize(0, 0)
+        right.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
+        )
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        self.video_view = CTVideoView(self.log)
+        self.video_view = CTVideoView(
+            self.log,
+            camera_workspace=getattr(self.main_window, "camera_panel", None),
+        )
         self.video_view.camera_properties.connect(self.update_camera_properties)
         right_layout.addWidget(self.video_view, 1)
         measurement = QGroupBox("Measured Temperature")
@@ -152,11 +170,43 @@ class CTVideo3MPanel(
         return panel
 
     def _build_connect_tab(self):
+        container = QScrollArea()
+        container.setWidgetResizable(True)
+        container.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         panel = QWidget()
-        form = QFormLayout(panel)
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout = QVBoxLayout(panel)
+        settings_group = QGroupBox("Connection Settings")
+        form = QFormLayout(settings_group)
+        self.connection_port_input = QLineEdit(self.port_input.text())
+        self.connection_port_input.setPlaceholderText("COM6 or auto")
+        self.connection_port_input.textEdited.connect(self.port_input.setText)
+        self.port_input.textEdited.connect(self.connection_port_input.setText)
+        self.baud_rate = QComboBox()
+        for value in (9600, 19200, 38400, 57600, 115200):
+            self.baud_rate.addItem(str(value), value)
+        self.baud_rate.setCurrentIndex(self.baud_rate.findData(115200))
+        self.connection_timeout = self._spin(0.05, 10.0, 0.5, 2)
+        self.connection_timeout.setSuffix(" s")
+        self.camera_index_override = self._integer_spin(-1, 10, -1)
+        self.camera_index_override.setSpecialValueText("Auto detect")
         self.refresh_rate = self._spin(0.1, 100.0, 10.0, 1)
         self.refresh_rate.setSuffix(" Hz")
         self.refresh_rate.valueChanged.connect(self._apply_refresh_rate)
+        form.addRow("Serial port", self.connection_port_input)
+        form.addRow("Baud rate", self.baud_rate)
+        form.addRow("Read timeout", self.connection_timeout)
+        form.addRow("Camera index", self.camera_index_override)
+        form.addRow("Data update rate", self.refresh_rate)
+        layout.addWidget(settings_group)
+
+        detected_group = QGroupBox("Detected Device Addresses")
+        detected_form = QFormLayout(detected_group)
         self.port_address_label = QLabel("-")
         self.port_address_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.port_container_label = QLabel("-")
@@ -167,14 +217,14 @@ class CTVideo3MPanel(
         self.camera_container_label = QLabel("-")
         self.camera_container_label.setWordWrap(True)
         self.camera_container_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        form.addRow("Serial port", QLabel("Set in the summary panel above"))
-        form.addRow("Baud rate", QLabel("115200 baud, 8-N-1, timeout 0.5 s"))
-        form.addRow("Data update rate", self.refresh_rate)
-        form.addRow("Port address", self.port_address_label)
-        form.addRow("Port Container ID", self.port_container_label)
-        form.addRow("Camera address", self.camera_address_label)
-        form.addRow("Camera Container ID", self.camera_container_label)
-        return panel
+        detected_form.addRow("Port address", self.port_address_label)
+        detected_form.addRow("Port Container ID", self.port_container_label)
+        detected_form.addRow("Camera address", self.camera_address_label)
+        detected_form.addRow("Camera Container ID", self.camera_container_label)
+        layout.addWidget(detected_group)
+        layout.addStretch()
+        container.setWidget(panel)
+        return container
 
     def _build_settings(self):
         panel = QWidget()
@@ -195,11 +245,18 @@ class CTVideo3MPanel(
         form.addRow("Peak hold [s]", self.peak_hold)
         splitter.addWidget(pyrometer_group)
 
-        camera_group = QGroupBox("CompactConnect Video Display")
+        camera_group = QGroupBox("Video Display")
         camera_layout = QVBoxLayout(camera_group)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         scroll_body = QWidget()
+        scroll_body.setMinimumWidth(0)
+        scroll_body.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         scroll_layout = QVBoxLayout(scroll_body)
 
         defaults = CompactConnectVideoDisplaySettings()
@@ -231,8 +288,13 @@ class CTVideo3MPanel(
         image_form.addRow("Mirror-Y", self.video_mirror_y)
         scroll_layout.addWidget(image_group)
 
-        overlay_group = QGroupBox("Target Circle and Background")
-        overlay_form = QFormLayout(overlay_group)
+        overlay_row = QWidget()
+        overlay_layout = QHBoxLayout(overlay_row)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        self.target_circle_group = QGroupBox("Target Circle")
+        self.target_circle_group.setMinimumWidth(0)
+        target_form = QFormLayout(self.target_circle_group)
+        target_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.target_circle_style = QComboBox()
         self.target_circle_style.addItem("Dotted line", "dotted")
         self.target_circle_style.addItem("Solid", "solid")
@@ -254,15 +316,25 @@ class CTVideo3MPanel(
         self.background_circle_diameter = self._integer_spin(
             100, 1200, defaults.background_circle_diameter
         )
-        overlay_form.addRow("Target line style", self.target_circle_style)
-        overlay_form.addRow("Target line width", self.target_circle_width)
-        overlay_form.addRow("Target line color", self.target_circle_color)
-        overlay_form.addRow("Background color", self.video_background_color)
-        overlay_form.addRow(
-            "Background circle / outside color", self.background_circle_color
+        target_form.addRow("Line style", self.target_circle_style)
+        target_form.addRow("Line width", self.target_circle_width)
+        target_form.addRow("Line color", self.target_circle_color)
+        self.sensor_optics_label = QLabel(
+            "Device optics: not read (target circle uses fallback size)"
         )
-        overlay_form.addRow("BG circle diameter / zoom", self.background_circle_diameter)
-        scroll_layout.addWidget(overlay_group)
+        self.sensor_optics_label.setWordWrap(True)
+        target_form.addRow("Detected optics", self.sensor_optics_label)
+
+        self.background_group = QGroupBox("Background")
+        self.background_group.setMinimumWidth(0)
+        background_form = QFormLayout(self.background_group)
+        background_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        background_form.addRow("Canvas color", self.video_background_color)
+        background_form.addRow("Outside color", self.background_circle_color)
+        background_form.addRow("Diameter / zoom", self.background_circle_diameter)
+        overlay_layout.addWidget(self.target_circle_group, 1)
+        overlay_layout.addWidget(self.background_group, 1)
+        scroll_layout.addWidget(overlay_row)
 
         hardware_group = QGroupBox("Camera Hardware (CompactConnect Vendor XU)")
         hardware_form = QFormLayout(hardware_group)
@@ -296,37 +368,12 @@ class CTVideo3MPanel(
         camera_buttons = QGridLayout()
         self.read_camera_button = QPushButton("Read Camera Hardware")
         self.read_camera_button.clicked.connect(self.read_camera_hardware_settings)
-        self.apply_display_button = QPushButton("Apply Display")
-        self.apply_display_button.clicked.connect(self.apply_video_display_settings)
         self.reset_display_button = QPushButton("Standard Display")
         self.reset_display_button.clicked.connect(self.reset_video_display_settings)
-        self.write_video_gain_button = QPushButton(
-            "Write Gain..."
-        )
-        self.write_video_gain_button.clicked.connect(
-            self.apply_compactconnect_video_gain
-        )
-        self.write_video_gain_button.setEnabled(False)
-        self.write_anti_flicker_button = QPushButton("Write Anti-flicker...")
-        self.write_anti_flicker_button.clicked.connect(
-            self.apply_compactconnect_anti_flicker
-        )
-        self.write_anti_flicker_button.setEnabled(False)
         camera_buttons.addWidget(self.read_camera_button, 0, 0)
-        camera_buttons.addWidget(self.apply_display_button, 0, 1)
-        camera_buttons.addWidget(self.reset_display_button, 0, 2)
-        camera_buttons.addWidget(self.write_video_gain_button, 1, 0)
-        camera_buttons.addWidget(self.write_anti_flicker_button, 1, 1)
+        camera_buttons.addWidget(self.reset_display_button, 0, 1)
         camera_buttons.setColumnStretch(3, 1)
         camera_layout.addLayout(camera_buttons)
-        vendor_warning = QLabel(
-            "Image and overlay controls are software display settings. Video Gain "
-            "and Anti-flicker write persistent camera EEPROM and are excluded "
-            "from Apply Display and saved profiles."
-        )
-        vendor_warning.setWordWrap(True)
-        vendor_warning.setStyleSheet("color:#d98200;")
-        camera_layout.addWidget(vendor_warning)
         self.camera_status_label = QLabel("Camera hardware: not read")
         self.camera_status_label.setWordWrap(True)
         camera_layout.addWidget(self.camera_status_label)
@@ -344,6 +391,12 @@ class CTVideo3MPanel(
         self.target_circle_style.currentIndexChanged.connect(
             self._video_display_changed
         )
+        self.compactconnect_video_gain.valueChanged.connect(
+            self.apply_compactconnect_video_gain
+        )
+        self.compactconnect_anti_flicker.currentIndexChanged.connect(
+            self.apply_compactconnect_anti_flicker
+        )
 
         splitter.addWidget(camera_group)
         splitter.setChildrenCollapsible(False)
@@ -352,11 +405,26 @@ class CTVideo3MPanel(
         splitter.setSizes([1, 1])
         pyrometer_group.setMinimumWidth(0)
         camera_group.setMinimumWidth(0)
+        pyrometer_group.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        camera_group.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         layout.addWidget(splitter)
         return panel
 
     def _build_calibration_tab(self):
+        container = QScrollArea()
+        container.setWidgetResizable(True)
+        container.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         layout = QVBoxLayout(panel)
 
         warning = QLabel(
@@ -381,35 +449,34 @@ class CTVideo3MPanel(
         layout.addWidget(identity_group)
 
         values_group = QGroupBox("Linear Pyrometer Calibration")
-        grid = QGridLayout(values_group)
-        for column, title in enumerate(
-            ("Parameter", "Current device value", "Proposed value", "Read-back / status")
-        ):
-            header = QLabel(f"<b>{title}</b>")
-            grid.addWidget(header, 0, column)
+        values_layout = QHBoxLayout(values_group)
 
         offset_spec, gain_spec = CTVideo3M.CALIBRATION_FIELDS
+        offset_group = QGroupBox("Tweak Offset")
+        offset_form = QFormLayout(offset_group)
         self.calibration_offset_current = QLabel("-")
         self.calibration_offset_proposed = self._spin(
             offset_spec.minimum, offset_spec.maximum, 0.0, offset_spec.decimals
         )
+        self.calibration_offset_proposed.setMinimumWidth(0)
         self.calibration_offset_proposed.setSingleStep(offset_spec.step)
         self.calibration_offset_readback = QLabel("Read current calibration first")
-        grid.addWidget(QLabel("Tweak Offset [°C]"), 1, 0)
-        grid.addWidget(self.calibration_offset_current, 1, 1)
-        grid.addWidget(self.calibration_offset_proposed, 1, 2)
-        grid.addWidget(self.calibration_offset_readback, 1, 3)
+        offset_form.addRow("Current", self.calibration_offset_current)
+        offset_form.addRow("Proposed [°C]", self.calibration_offset_proposed)
+        offset_form.addRow("Read-back", self.calibration_offset_readback)
 
+        gain_group = QGroupBox("Tweak Gain")
+        gain_form = QFormLayout(gain_group)
         self.calibration_gain_current = QLabel("-")
         self.calibration_gain_proposed = self._spin(
             gain_spec.minimum, gain_spec.maximum, 1.0, gain_spec.decimals
         )
+        self.calibration_gain_proposed.setMinimumWidth(0)
         self.calibration_gain_proposed.setSingleStep(gain_spec.step)
         self.calibration_gain_readback = QLabel("Read current calibration first")
-        grid.addWidget(QLabel("Tweak Gain"), 2, 0)
-        grid.addWidget(self.calibration_gain_current, 2, 1)
-        grid.addWidget(self.calibration_gain_proposed, 2, 2)
-        grid.addWidget(self.calibration_gain_readback, 2, 3)
+        gain_form.addRow("Current", self.calibration_gain_current)
+        gain_form.addRow("Proposed", self.calibration_gain_proposed)
+        gain_form.addRow("Read-back", self.calibration_gain_readback)
 
         for label in (
             self.calibration_offset_current, self.calibration_offset_readback,
@@ -425,9 +492,10 @@ class CTVideo3MPanel(
         self.calibration_gain_proposed.valueChanged.connect(
             self._calibration_proposal_changed
         )
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
-        grid.setColumnStretch(3, 2)
+        offset_group.setMinimumWidth(0)
+        gain_group.setMinimumWidth(0)
+        values_layout.addWidget(offset_group, 1)
+        values_layout.addWidget(gain_group, 1)
         layout.addWidget(values_group)
 
         self.calibration_ack = QCheckBox(
@@ -456,7 +524,8 @@ class CTVideo3MPanel(
         layout.addWidget(self.calibration_status_label)
         layout.addStretch()
         self._update_calibration_actions()
-        return panel
+        container.setWidget(panel)
+        return container
 
     @staticmethod
     def _spin(minimum, maximum, value, decimals):
@@ -490,23 +559,27 @@ class CTVideo3MPanel(
         )
         port = self.port_input.text().strip()
         interval = 1.0 / self.refresh_rate.value()
+        baudrate = int(self.baud_rate.currentData())
+        timeout = self.connection_timeout.value()
+        camera_index_override = self.camera_index_override.value()
 
         def connect():
             try:
                 self.manager.add_device(
                     "CTVIDEO3M",
-                    lambda: create_ctvideo(port, verify=True),
+                    lambda: create_ctvideo(
+                        port,
+                        verify=True,
+                        baudrate=baudrate,
+                        timeout=timeout,
+                    ),
                     interval=interval,
                 )
-                try:
-                    camera_info, camera_error = resolve_camera_for_port(port), None
-                except Exception as caught:
-                    camera_info, camera_error = ({
-                        "PortName": port,
-                        "CameraIndex": 1,
-                        "CameraName": "CTvideo OpenCV fallback",
-                        "CameraDevicePath": "OpenCV preferred index 1 with recovery",
-                    }, caught)
+                camera_info, camera_error = self._resolve_camera_info(
+                    port,
+                    camera_index_override=camera_index_override,
+                    log_errors=False,
+                )
                 settings = self.get_device().read_settings()
                 return camera_info, camera_error, settings
             except Exception:
@@ -558,22 +631,38 @@ class CTVideo3MPanel(
             key="connection",
         )
 
-    def _resolve_camera_info(self, port):
+    def _resolve_camera_info(
+        self, port, *, camera_index_override=None, log_errors=True,
+    ):
         try:
-            return resolve_camera_for_port(port)
+            info = resolve_camera_for_port(port)
+            error = None
         except Exception as camera_error:
             # The capture worker tries alternative backends and indices if
             # this preferred fallback is unavailable.
-            self.log(
-                f"Camera mapping failed ({camera_error}); "
-                "starting automatic OpenCV source recovery."
-            )
-            return {
+            if log_errors:
+                self.log(
+                    f"Camera mapping failed ({camera_error}); "
+                    "starting automatic OpenCV source recovery."
+                )
+            info = {
                 "PortName": port,
-                "CameraIndex": 1,
+                "CameraIndex": -1,
                 "CameraName": "CTvideo OpenCV fallback",
-                "CameraDevicePath": "OpenCV preferred index 1 with recovery",
+                "CameraDevicePath": "OpenCV automatic source recovery",
             }
+            error = camera_error
+        override = (
+            self.camera_index_override.value()
+            if camera_index_override is None
+            else int(camera_index_override)
+        )
+        if override >= 0:
+            info = dict(info)
+            info["CameraIndex"] = override
+            info["CameraName"] = f"Manual camera index {override}"
+            info["CameraDevicePath"] = f"User-selected OpenCV index {override}"
+        return info, error
 
     def ensure_video_preview(self):
         if (
@@ -584,7 +673,9 @@ class CTVideo3MPanel(
             return
         self._video_attach_attempted = True
         try:
-            info = self._resolve_camera_info(self.port_input.text().strip())
+            info, _error = self._resolve_camera_info(
+                self.port_input.text().strip()
+            )
             self._show_connection_addresses(info)
             if not self.video_view.start_preview(
                 info["CameraIndex"], info["CameraName"],
@@ -624,12 +715,12 @@ class CTVideo3MPanel(
 
     def stop_video(self):
         self.video_view.stop_preview()
+        self._latest_vendor_gain_request = None
+        self._latest_vendor_anti_flicker_request = None
         self.compactconnect_video_gain_supported = False
         self.compactconnect_anti_flicker_supported = False
         self.compactconnect_video_gain.setEnabled(False)
         self.compactconnect_anti_flicker.setEnabled(False)
-        self.write_video_gain_button.setEnabled(False)
-        self.write_anti_flicker_button.setEnabled(False)
         self.video_gain_readback.setText("Read camera hardware after reconnecting")
         self.anti_flicker_readback.setText(
             "Read camera hardware after reconnecting"
@@ -710,6 +801,32 @@ class CTVideo3MPanel(
         self.average_time.setValue(values["average_time_s"])
         self.smart_averaging.setChecked(values["smart_averaging"])
         self.peak_hold.setValue(values["peak_hold_s"])
+        sensor_information = values.get("sensor_information")
+        if sensor_information is not None:
+            resolution = sensor_information.optical_resolution
+            self._target_optical_resolution = int(resolution or 0)
+            model = sensor_information.model_name or (
+                f"unknown model word 0x{sensor_information.model_word:04X}"
+            )
+            if resolution:
+                self.sensor_optics_label.setText(
+                    f"{model} · D:S {resolution}:1 · device range "
+                    f"{sensor_information.minimum_temperature_C:g}–"
+                    f"{sensor_information.maximum_temperature_C:g} °C"
+                )
+            else:
+                self.sensor_optics_label.setText(
+                    f"{model} · optical resolution unknown "
+                    "(target circle uses fallback size)"
+                )
+        elif values.get("sensor_information_error"):
+            self._target_optical_resolution = 0
+            self.sensor_optics_label.setText(
+                "Device optics unavailable; target circle uses fallback size · "
+                + values["sensor_information_error"]
+            )
+        if self.video_view.worker is not None:
+            self.apply_video_display_settings(log_change=False)
         self.device_settings_snapshot = {
             "emissivity": float(values["emissivity"]),
             "transmission": float(values["transmission"]),
@@ -778,6 +895,9 @@ class CTVideo3MPanel(
     def profile_data(self):
         return {
             "port": self.port_input.text(),
+            "baud_rate": int(self.baud_rate.currentData()),
+            "connection_timeout_s": self.connection_timeout.value(),
+            "camera_index": self.camera_index_override.value(),
             "refresh_rate_Hz": self.refresh_rate.value(),
             "emissivity": self.emissivity.value(),
             "transmission": self.transmission.value(),
@@ -788,7 +908,17 @@ class CTVideo3MPanel(
         }
 
     def load_profile_data(self, data):
-        self.port_input.setText(data.get("port", default_connection()))
+        port = data.get("port", default_connection())
+        self.port_input.setText(port)
+        self.connection_port_input.setText(port)
+        baud_rate = int(data.get("baud_rate", 115200))
+        baud_index = self.baud_rate.findData(baud_rate)
+        if baud_index >= 0:
+            self.baud_rate.setCurrentIndex(baud_index)
+        self.connection_timeout.setValue(
+            data.get("connection_timeout_s", 0.5)
+        )
+        self.camera_index_override.setValue(data.get("camera_index", -1))
         self.refresh_rate.setValue(data.get("refresh_rate_Hz", 10.0))
         self.emissivity.setValue(data.get("emissivity", 1.0))
         self.transmission.setValue(data.get("transmission", 1.0))

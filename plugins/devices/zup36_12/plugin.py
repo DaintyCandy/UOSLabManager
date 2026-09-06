@@ -86,7 +86,7 @@ class ZUP3612Plugin(DevicePlugin):
 
     def connect(self, connection: str):
         from .driver import ZUP36_12
-        return ZUP36_12(connection)
+        return ZUP36_12.connect_verified(connection)
 
 
 plugin = ZUP3612Plugin()

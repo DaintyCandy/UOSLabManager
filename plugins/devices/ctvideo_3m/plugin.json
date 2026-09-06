@@ -6,6 +6,7 @@
   "id": "CTVIDEO3M",
   "name": "CTvideo 3M",
   "version": "1.0.0",
+  "bundled_version": 1,
   "entrypoint": "plugin.py:plugin",
   "enabled": true,
   "platforms": ["windows", "macos"],
@@ -36,7 +37,7 @@
     },
     {
       "id": "camera_eeprom_write",
-      "confirmation": "required",
+      "confirmation": "none",
       "read_before_write": true,
       "verify_after_write": true
     }

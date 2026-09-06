@@ -1,21 +1,21 @@
 from core.plugin_manager import ExperimentPlugin, SequenceCommand
 
 
-def create_panel(manager, parent):
+def create_panel(context, parent):
     from .panel import ExperimentPanel
-    return ExperimentPanel(manager, parent)
+    return ExperimentPanel(context, parent)
 
 
 plugin = ExperimentPlugin(
     experiment_id='MBE1',
-    display_name='MBE Chamber Monitor',
+    display_name='MBE Heating Monitor',
     panel_factory=create_panel,
     sequence_commands=(
         SequenceCommand(
-            key="set_temperature_setpoint", label="Set temperature setpoint", unit="°C",
-            minimum=0.0, maximum=2000.0, default=25.0, decimals=1,
+            key="set_value", label="Heating Setpoint", unit="°C",
+            minimum=-50.0, maximum=2000.0, default=300.0, decimals=1,
         ),
     ),
-    description="MBE chamber camera, pyrometer, and heating-control monitor",
+    description="Pyrometer, camera, notes, and heating control",
     order=100,
 )

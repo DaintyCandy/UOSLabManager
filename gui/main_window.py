@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
 )
 
 from core import (
-    DeviceManager, load_device_plugins, load_experiment_plugins, storage_dir,
+    DeviceManager, ExperimentContext, load_device_plugins,
+    load_experiment_plugins, storage_dir,
 )
 from .panel_dashboard import DashboardPanel
 from .panel_camera import CameraWorkspace
@@ -105,6 +106,9 @@ class MainWindow(QMainWindow):
         default_output_dir = str(storage_dir("camera_recordings"))
         output_dir = self.window_settings.value("camera/output_dir", default_output_dir)
         self.camera_panel = CameraWorkspace(output_dir, self.log)
+        self.experiment_context = ExperimentContext(
+            self.manager, self.camera_panel, self._resolve_experiment_panel
+        )
         self.plugin_studio = PluginStudioPanel(self)
         self.plugin_studio.reload_requested.connect(self.reload_experiment_plugins)
 
@@ -358,6 +362,15 @@ class MainWindow(QMainWindow):
             panel.sync_connection_status()
         self.tabs.setCurrentIndex(index)
 
+    def _resolve_experiment_panel(self, experiment_id, *, create=False):
+        panel = self.experiment_tabs.get(experiment_id)
+        if panel is None and create:
+            if experiment_id not in self.experiment_plugins:
+                return None
+            self.open_experiment(experiment_id)
+            panel = self.experiment_tabs.get(experiment_id)
+        return panel
+
     def open_experiment(self, experiment_id):
         plugin = self.experiment_plugins[experiment_id]
         if plugin.panel_factory is not None:
@@ -365,7 +378,7 @@ class MainWindow(QMainWindow):
             if panel is None:
                 try:
                     with visible_busy_dialog(self):
-                        panel = plugin.panel_factory(self.manager, self)
+                        panel = plugin.panel_factory(self.experiment_context, self)
                 except Exception as error:
                     message = (
                         f"Could not open {plugin.display_name}:\n\n{error}"
@@ -490,6 +503,19 @@ class MainWindow(QMainWindow):
             ),
             None,
         )
+        active_panel = self.experiment_tabs.get(active_id)
+        previous_panel = getattr(self, "_active_experiment_panel", None)
+        if previous_panel is not None and previous_panel is not active_panel:
+            deactivate = getattr(previous_panel, "deactivate", None)
+            if deactivate is not None:
+                deactivate()
+        self._active_experiment_panel = active_panel
+        if active_panel is not None and active_panel is not previous_panel:
+            activate = getattr(active_panel, "activate", None)
+            if activate is not None:
+                activate()
+        elif current is self.camera_panel:
+            self.camera_panel.show_camera_workspace()
         self.dashboard.set_active_experiment(active_id)
 
     def close_tab(self, index):

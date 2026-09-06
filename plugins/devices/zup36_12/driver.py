@@ -22,8 +22,11 @@ class ZUP36_12:
         write_timeout: float = 2.0, character_delay: float = 0.010,
         command_delay: float = 0.050, address: int = 1,
     ):
-        if not 0 <= int(address) <= 31:
-            raise ValueError("ZUP address must be between 0 and 31")
+        port = str(port).strip()
+        if not port:
+            raise ValueError("ZUP serial port cannot be empty")
+        if not 1 <= int(address) <= 31:
+            raise ValueError("ZUP address must be between 1 and 31")
         if character_delay < 0:
             raise ValueError("character_delay must be zero or greater")
         if command_delay < 0:
@@ -31,18 +34,28 @@ class ZUP36_12:
         self.address = int(address)
         self.character_delay = float(character_delay)
         self.command_delay = float(command_delay)
-        self.ser = serial.Serial(
-            port=port,
-            baudrate=int(baudrate),
-            bytesize=int(bytesize),
-            parity=str(parity).upper(),
-            stopbits=float(stopbits),
-            timeout=float(timeout),
-            write_timeout=float(write_timeout),
-            xonxoff=True,
-            rtscts=False,
-            dsrdtr=False,
+        self.connection_description = (
+            f"{port}, {int(baudrate)} baud, {int(bytesize)}-"
+            f"{str(parity).upper()}-{float(stopbits):g}, address {self.address:02d}"
         )
+        try:
+            self.ser = serial.Serial(
+                port=port,
+                baudrate=int(baudrate),
+                bytesize=int(bytesize),
+                parity=str(parity).upper(),
+                stopbits=float(stopbits),
+                timeout=float(timeout),
+                write_timeout=float(write_timeout),
+                xonxoff=True,
+                rtscts=False,
+                dsrdtr=False,
+            )
+        except (OSError, serial.SerialException) as error:
+            raise ConnectionError(
+                f"Could not open ZUP serial port {port!r}: {error}. "
+                "Check that the port exists and is not open in another program."
+            ) from error
         time.sleep(0.5)
         self.model = "Unknown"
         self.identification_error = ""
@@ -52,6 +65,30 @@ class ZUP36_12:
             self.identification_error = str(error)
         # Connection is observational: preserve remote/local mode,
         # auto-restart, output state, and programmed voltage/current.
+
+    @classmethod
+    def connect_verified(cls, port: str, **settings):
+        """Open a ZUP and verify a complete status reply before registering it."""
+        device = cls(port, **settings)
+        try:
+            device.verified_settings = device.read_settings()
+        except Exception as error:
+            device.close_port()
+            raise ConnectionError(
+                "The serial port opened, but the ZUP did not return a valid "
+                f"status ({device.connection_description}). Check the front-panel "
+                "address, baud rate, RS232 mode, REM mode, and NC401-compatible "
+                f"cable. Detail: {error}"
+            ) from error
+        return device
+
+    def get_verified_settings(self):
+        return dict(self.verified_settings)
+
+    def close_port(self):
+        """Close the transport without issuing output-changing commands."""
+        if self.ser and self.ser.is_open:
+            self.ser.close()
 
     def close(self):
         if self.ser and self.ser.is_open:
@@ -66,7 +103,7 @@ class ZUP36_12:
                     except Exception:
                         pass
             finally:
-                self.ser.close()
+                self.close_port()
 
     @staticmethod
     def _normalize_command(command: str) -> str:

@@ -41,7 +41,7 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
-실행하면 repository 또는 실행 파일 위치에 `data/`와 `camera_recordings/`가 생성됩니다. 배포 빌드의 편집 가능한 플러그인은 `%LOCALAPPDATA%\UOSLabManager\plugins`에 준비됩니다. 개발 중 다른 플러그인 경로를 사용하려면 `UOSLAB_PLUGIN_DIR` 환경 변수를 설정할 수 있습니다.
+실행하면 repository 또는 실행 파일 위치에 `data/`와 `camera_recordings/`가 생성됩니다. 배포 빌드의 편집 가능한 플러그인은 `UOSLabManager.exe` 옆의 `plugins` 폴더에 있습니다. 다른 플러그인 경로를 사용하려면 `UOSLAB_PLUGIN_DIR` 환경 변수를 설정할 수 있습니다.
 
 ## 기본 사용 흐름
 

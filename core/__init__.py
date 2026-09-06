@@ -1,4 +1,5 @@
 from .device_manager import DeviceManager
+from .experiment_context import ExperimentContext
 from .app_paths import application_dir, resource_path, storage_dir
 from .plugin_manager import (
     AlarmRule, DataColumn, DevicePlugin, ExperimentPlugin, RecipeMigration,
@@ -12,7 +13,8 @@ from .sequence_engine import SequenceEngine, SequenceResult, SequenceState
 from .measurement_pipeline import MeasurementPipeline
 
 __all__ = [
-    "AlarmRule", "DataColumn", "DeviceManager", "DevicePlugin", "ExperimentPlugin",
+    "AlarmRule", "DataColumn", "DeviceManager", "DevicePlugin",
+    "ExperimentContext", "ExperimentPlugin",
     "RecipeMigration", "SafeAction", "SequenceCommand",
     "SequenceEngine", "SequenceResult", "SequenceState",
     "MeasurementPipeline",

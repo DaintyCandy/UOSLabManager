@@ -9,8 +9,8 @@ from plugins.devices.ctvideo_3m.compactconnect_camera import (
 )
 
 
-class CompactConnectVideoGainSafetyTests(unittest.TestCase):
-    """Safety contract for the vendor EEPROM-backed product setting.
+class CompactConnectVideoGainValidationTests(unittest.TestCase):
+    """Validation contract for the vendor EEPROM-backed product setting.
 
     ``CompactConnect Video Gain`` is the product's YTarget setting.  It is not
     the standard UVC/DirectShow ``Gain`` control.  These tests deliberately use
@@ -22,24 +22,6 @@ class CompactConnectVideoGainSafetyTests(unittest.TestCase):
         self.controller = CompactConnectCameraController(
             friendly_name="CTvideo offline safety test"
         )
-
-    def test_write_requires_explicit_acknowledgement_before_device_access(self):
-        with mock.patch.object(self.controller, "_require_open") as require_open:
-            with self.assertRaises(PermissionError):
-                self.controller.set_compactconnect_video_gain(4)
-            with self.assertRaises(PermissionError):
-                self.controller.set_compactconnect_video_gain(
-                    4, acknowledged=False
-                )
-
-        require_open.assert_not_called()
-
-    def test_acknowledgement_is_keyword_only(self):
-        with mock.patch.object(self.controller, "_require_open") as require_open:
-            with self.assertRaises(TypeError):
-                self.controller.set_compactconnect_video_gain(4, True)
-
-        require_open.assert_not_called()
 
     def test_invalid_values_are_rejected_before_device_access(self):
         cases = (
@@ -53,9 +35,7 @@ class CompactConnectVideoGainSafetyTests(unittest.TestCase):
             for value, exception_type in cases:
                 with self.subTest(value=value):
                     with self.assertRaises(exception_type):
-                        self.controller.set_compactconnect_video_gain(
-                            value, acknowledged=True
-                        )
+                        self.controller.set_compactconnect_video_gain(value)
 
         require_open.assert_not_called()
 
@@ -69,9 +49,7 @@ class CompactConnectVideoGainSafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(
                         RuntimeError, "native access attempted"
                     ):
-                        self.controller.set_compactconnect_video_gain(
-                            value, acknowledged=True
-                        )
+                        self.controller.set_compactconnect_video_gain(value)
 
         self.assertEqual(require_open.call_count, 2)
 
@@ -150,9 +128,7 @@ class CompactConnectVideoGainProtocolTests(unittest.TestCase):
         ), mock.patch.object(
             self.controller, "_write_eeprom_block"
         ) as write_block:
-            result = self.controller.set_compactconnect_video_gain(
-                179, acknowledged=True
-            )
+            result = self.controller.set_compactconnect_video_gain(179)
 
         self.assertTrue(result.verified)
         self.assertIs(result.before, result.after)
