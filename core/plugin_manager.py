@@ -257,19 +257,7 @@ def get_plugin_root() -> Path:
         return Path(configured).expanduser().resolve()
 
     if getattr(sys, "frozen", False):
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        data_root = (
-            Path(local_app_data)
-            if local_app_data
-            else Path.home() / "AppData" / "Local"
-        )
-        destination = data_root / "UOSLabManager" / "plugins"
-        legacy_root = data_root / "UOSLabManager" / "user_plugins"
-        bundled_root = Path(getattr(sys, "_MEIPASS", "")) / "plugins"
-        _seed_plugins(legacy_root, destination)
-        _seed_plugins(bundled_root, destination)
-        _migrate_legacy_bundled_plugins(bundled_root, destination)
-        return destination.resolve()
+        return (Path(sys.executable).resolve().parent / "plugins").resolve()
 
     return Path(__file__).resolve().parents[1] / "plugins"
 
@@ -558,6 +546,57 @@ def _seed_plugins(source: Path, destination: Path) -> None:
         elif not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, target)
+
+
+def _update_versioned_bundled_plugins(source: Path, destination: Path) -> None:
+    """Update app-provided plugins while retaining changed files as backups."""
+    for category in ("devices", "experiments"):
+        source_category = source / category
+        destination_category = destination / category
+        if not source_category.is_dir():
+            continue
+        for source_manifest in source_category.glob("*/plugin.json"):
+            try:
+                source_data = json.loads(source_manifest.read_text(encoding="utf-8"))
+                source_version = int(source_data.get("bundled_version", 0))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if source_version <= 0:
+                continue
+            source_plugin = source_manifest.parent
+            target_plugin = destination_category / source_plugin.name
+            target_manifest = target_plugin / "plugin.json"
+            target_version = 0
+            if target_manifest.is_file():
+                try:
+                    target_data = json.loads(
+                        target_manifest.read_text(encoding="utf-8")
+                    )
+                    target_version = int(target_data.get("bundled_version", 0))
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    target_version = 0
+            if target_version >= source_version:
+                continue
+            target_plugin.mkdir(parents=True, exist_ok=True)
+            for source_path in source_plugin.rglob("*"):
+                if (
+                    not source_path.is_file()
+                    or "__pycache__" in source_path.parts
+                ):
+                    continue
+                relative = source_path.relative_to(source_plugin)
+                target = target_plugin / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if (
+                    target.is_file()
+                    and target.read_bytes() != source_path.read_bytes()
+                ):
+                    backup = target.with_name(
+                        f"{target.name}.bundled-v{target_version}.backup"
+                    )
+                    if not backup.exists():
+                        shutil.copy2(target, backup)
+                shutil.copy2(source_path, target)
 
 
 def _migrate_legacy_bundled_plugins(source: Path, destination: Path) -> None:

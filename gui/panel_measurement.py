@@ -9,11 +9,12 @@ from core.data_logger import DataLogger
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
     QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-    QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
+    QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 from .widget_graph_selection import GraphSelectionTree
+from .layout_mode import AdaptiveRowLayout, AdaptiveSplitter, apply_panel_layout
 
 
 _MISSING = object()
@@ -93,7 +94,7 @@ class MeasurementPanels:
         layout.addLayout(controls)
         pg.setConfigOption("background", "#202124")
         pg.setConfigOption("foreground", "#e8eaed")
-        self.graph_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.graph_splitter = AdaptiveSplitter()
         self.graph_splitter.setHandleWidth(0)
         self.graph_splitter.setChildrenCollapsible(False)
         self.graph_splitter.addWidget(self._build_plot_pane(1))
@@ -144,7 +145,10 @@ class MeasurementPanels:
         return pane
 
     def set_split_graph(self, enabled):
-        minimum_width = 420 if enabled else 0
+        minimum_width = (
+            420 if enabled and self.graph_splitter.orientation() == Qt.Orientation.Horizontal
+            else 0
+        )
         for pane in self.graph_panes:
             pane.setMinimumWidth(minimum_width)
         self.graph_panes[1].setVisible(enabled)
@@ -157,9 +161,11 @@ class MeasurementPanels:
     def _build_table_widget(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel("Data Table"))
-        controls.addWidget(QLabel("Update (ms)"))
+        controls = AdaptiveRowLayout(compact_columns=2)
+        title = QLabel("Data Table")
+        interval_label = QLabel("Update (ms)")
+        controls.addWidget(title)
+        controls.addWidget(interval_label)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(50, 60_000)
         self.interval_spin.setSingleStep(50)
@@ -169,7 +175,8 @@ class MeasurementPanels:
         )
         self.interval_spin.valueChanged.connect(self.set_update_interval)
         controls.addWidget(self.interval_spin)
-        controls.addWidget(QLabel("Buffer rows"))
+        buffer_label = QLabel("Buffer rows")
+        controls.addWidget(buffer_label)
         self.buffer_spin = QSpinBox()
         self.buffer_spin.setRange(100, 1_000_000)
         self.buffer_spin.setSingleStep(1000)
@@ -190,11 +197,37 @@ class MeasurementPanels:
         controls.addWidget(self.record_button)
         controls.addWidget(save)
         controls.addWidget(clear)
+        for widget, position in (
+            (title, (0, 0, 1, 2)),
+            (interval_label, (1, 0)), (self.interval_spin, (1, 1)),
+            (buffer_label, (2, 0)), (self.buffer_spin, (2, 1)),
+            (self.record_button, (3, 0, 1, 2)),
+            (save, (4, 0)), (clear, (4, 1)),
+        ):
+            controls.set_compact_position(widget, *position)
         layout.addLayout(controls)
         self.table = QTableWidget(0, len(self.columns))
         self.table.setHorizontalHeaderLabels(self.columns)
         layout.addWidget(self.table)
         return panel
+
+    def set_layout_mode(self, mode):
+        apply_panel_layout(self.graph_widget, mode)
+        apply_panel_layout(self.table_widget, mode)
+        enabled = self.split_graph_button.isChecked()
+        for pane in self.graph_panes:
+            pane.setMinimumWidth(420 if enabled and mode == "wide" else 0)
+        for selector in self.graph_selectors:
+            selector.setFixedHeight(selector.sizeHint().height() if mode == "compact" else 58)
+        for plot in self.plots:
+            plot.getAxis("bottom").setHeight(42 if mode == "compact" else 30)
+            plot_layout = plot.getPlotItem().layout
+            if not hasattr(plot, "_wide_layout_margins"):
+                plot._wide_layout_margins = plot_layout.getContentsMargins()
+            left, top, right, bottom = plot._wide_layout_margins
+            # AxisItem nudges the title 5 px beyond its own bottom edge.
+            plot_layout.setContentsMargins(left, top, right, max(bottom, 8) if mode == "compact" else bottom)
+        self.layout_mode = mode
 
     def _build_log_widget(self):
         group = QGroupBox("System Log")

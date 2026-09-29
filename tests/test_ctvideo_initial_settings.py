@@ -7,6 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication
 
 from plugins.devices.ctvideo_3m.panel import CTVideo3MPanel
+from plugins.devices.ctvideo_3m.driver import SensorInformation
 
 
 ORIGINAL = {
@@ -95,6 +96,47 @@ class CTVideoInitialSettingsTests(unittest.TestCase):
         self.panel.show_error.assert_called_once()
         self.device.read_settings.assert_not_called()
         self.device.set_emissivity.assert_not_called()
+
+    def test_detected_sensor_optics_updates_target_circle(self):
+        information = SensorInformation(
+            model_word=0x1234,
+            minimum_temperature_C=150.0,
+            maximum_temperature_C=1000.0,
+            model_name="CTvideo 3MH1",
+            optical_resolution=300,
+        )
+
+        self.panel._apply_device_settings({
+            **ORIGINAL,
+            "sensor_information": information,
+        })
+
+        self.assertEqual(self.panel._target_optical_resolution, 300)
+        self.assertEqual(
+            self.panel.video_display_settings()["target_optical_resolution"],
+            300,
+        )
+        self.assertIn("CTvideo 3MH1", self.panel.sensor_optics_label.text())
+        self.assertIn("300:1", self.panel.sensor_optics_label.text())
+
+    def test_connection_settings_round_trip_in_profile(self):
+        profile = self.panel.profile_data()
+        profile.update({
+            "port": "COM9",
+            "baud_rate": 57600,
+            "connection_timeout_s": 1.25,
+            "camera_index": 3,
+            "refresh_rate_Hz": 25.0,
+        })
+
+        self.panel.load_profile_data(profile)
+
+        self.assertEqual(self.panel.port_input.text(), "COM9")
+        self.assertEqual(self.panel.connection_port_input.text(), "COM9")
+        self.assertEqual(self.panel.baud_rate.currentData(), 57600)
+        self.assertEqual(self.panel.connection_timeout.value(), 1.25)
+        self.assertEqual(self.panel.camera_index_override.value(), 3)
+        self.assertEqual(self.panel.refresh_rate.value(), 25.0)
 
 
 if __name__ == "__main__":

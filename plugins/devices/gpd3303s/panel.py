@@ -3,15 +3,16 @@ import time
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QLabel, QLineEdit, QMessageBox, QPushButton,
     QVBoxLayout, QWidget,
 )
 
 from .driver import GPD3303S
 from gui.widget_busy_spinner import run_busy_task
+from gui.layout_mode import AdaptivePanelMixin, AdaptiveRowLayout
 
 
-class GPD3303SPanel(QWidget):
+class GPD3303SPanel(AdaptivePanelMixin, QWidget):
     def __init__(self, manager, plugin, parent=None):
         super().__init__(parent)
         self.manager = manager
@@ -29,12 +30,12 @@ class GPD3303SPanel(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        top = QHBoxLayout()
+        top = AdaptiveRowLayout(compact_columns=1)
         top.addWidget(self._build_connection_group(), 1)
         top.addWidget(self._build_monitor_group(), 2)
         root.addLayout(top)
 
-        buttons = QHBoxLayout()
+        buttons = AdaptiveRowLayout(compact_columns=2)
         for text, callback in (
             ("Read Device", self.read_device),
             ("Apply Settings", self.apply_settings),

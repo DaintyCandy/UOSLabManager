@@ -15,9 +15,10 @@ from PyQt6.QtWidgets import (
 
 from .driver import LakeShore331
 from gui.widget_busy_spinner import run_busy_task
+from gui.layout_mode import AdaptivePanelMixin, AdaptiveRowLayout
 
 
-class LakeShore331Window(QWidget):
+class LakeShore331Window(AdaptivePanelMixin, QWidget):
     SENSOR_TYPES = (
         ("Silicon Diode", 0), ("GaAlAs Diode", 1), ("PT-100 / 250", 2),
         ("PT-100 / 500", 3), ("PT-1000", 4), ("NTC RTD", 5),
@@ -68,7 +69,7 @@ class LakeShore331Window(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        top = QHBoxLayout()
+        top = AdaptiveRowLayout(compact_columns=1)
         top.addWidget(self._build_summary(), 3)
         top.addWidget(self._build_log(), 2)
         root.addLayout(top)
@@ -160,7 +161,7 @@ class LakeShore331Window(QWidget):
 
     def _build_input_tab(self, channel):
         panel = QWidget()
-        layout = QHBoxLayout(panel)
+        layout = AdaptiveRowLayout(panel, compact_columns=1)
         sensor_group = QGroupBox("Input Configuration")
         sensor_form = QFormLayout(sensor_group)
         input_name = QLineEdit(f"Input {channel}")
@@ -199,7 +200,7 @@ class LakeShore331Window(QWidget):
         # Outer padding protects axis titles from the group-box frame. Axis
         # dimensions remain automatic so label-to-tick spacing is unchanged.
         tracking_layout.setContentsMargins(12, 18, 12, 20)
-        plots_layout = QHBoxLayout()
+        plots_layout = AdaptiveRowLayout(compact_columns=1)
         plots_layout.setContentsMargins(0, 0, 0, 0)
 
         temperature_group = QGroupBox("Temperature")
@@ -331,7 +332,7 @@ class LakeShore331Window(QWidget):
     def _build_loop_tab(self, loop):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        groups_layout = QHBoxLayout()
+        groups_layout = AdaptiveRowLayout(compact_columns=1)
         controls = {
             "mode": QComboBox(), "input": QComboBox(), "units": QComboBox(),
             "setpoint": self._spin(-273.15, 1000, 300), "powerup": QCheckBox("Restore output after restart"),
@@ -458,7 +459,7 @@ class LakeShore331Window(QWidget):
     def _build_zone_settings_tab(self):
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        controls = QHBoxLayout()
+        controls = AdaptiveRowLayout(compact_columns=2)
         controls.addWidget(QLabel("Control Loop"))
         self.zone_loop = QComboBox()
         self.zone_loop.addItem("Loop 1", 1)
@@ -545,7 +546,7 @@ class LakeShore331Window(QWidget):
 
     def _build_curve_editor_tab(self):
         panel = QWidget()
-        layout = QHBoxLayout(panel)
+        layout = AdaptiveRowLayout(panel, compact_columns=1)
         header_group = QGroupBox("User Curve Header")
         header_form = QFormLayout(header_group)
         self.curve_number = QComboBox()

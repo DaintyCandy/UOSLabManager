@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QLabel
 
 from plugins.devices.ctvideo_3m.panel import CTVideo3MPanel
 from plugins.devices.ctvideo_3m.video_display import (
@@ -24,6 +25,7 @@ SOFTWARE_DISPLAY_KEYS = {
     "target_circle_style",
     "target_circle_width",
     "target_circle_color",
+    "target_optical_resolution",
     "background_color",
     "background_circle_color",
     "background_circle_diameter",
@@ -97,8 +99,17 @@ class CTVideoVendorPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.compactconnect_video_gain.minimum(), 1)
         self.assertEqual(self.panel.compactconnect_video_gain.maximum(), 255)
         self.assertTrue(self.panel.compactconnect_anti_flicker.isEnabled())
-        self.assertTrue(self.panel.write_video_gain_button.isEnabled())
-        self.assertTrue(self.panel.write_anti_flicker_button.isEnabled())
+        self.assertFalse(hasattr(self.panel, "write_video_gain_button"))
+        self.assertFalse(hasattr(self.panel, "write_anti_flicker_button"))
+
+    def test_target_circle_and_background_are_side_by_side_without_warning(self):
+        layout = self.panel.target_circle_group.parentWidget().layout()
+        self.assertEqual(layout.indexOf(self.panel.target_circle_group), 0)
+        self.assertEqual(layout.indexOf(self.panel.background_group), 1)
+        labels = [label.text() for label in self.panel.findChildren(QLabel)]
+        self.assertFalse(any(
+            "persist in camera EEPROM" in text for text in labels
+        ))
 
     def test_profile_contains_only_software_display_settings(self):
         profile = self.panel.profile_data()
@@ -152,52 +163,42 @@ class CTVideoVendorPanelTests(unittest.TestCase):
             "Off and 50 Hz", self.panel.compactconnect_anti_flicker.toolTip()
         )
 
-    def test_cancelled_gain_confirmation_never_queues_eeprom_write(self):
-        with patch(
-            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
-            return_value=QMessageBox.StandardButton.No,
-        ):
-            self.assertFalse(self.panel.apply_compactconnect_video_gain())
-        self.worker.set_compactconnect_video_gain.assert_not_called()
-
-    def test_confirmed_gain_is_queued_separately(self):
+    def test_gain_change_is_queued_immediately_without_confirmation(self):
+        self.worker.reset_mock()
         self.panel.compactconnect_video_gain.setValue(200)
-        with patch(
-            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
-            return_value=QMessageBox.StandardButton.Yes,
-        ):
-            self.assertTrue(self.panel.apply_compactconnect_video_gain())
-        self.worker.set_compactconnect_video_gain.assert_called_once_with(
-            200, confirmed=True
-        )
+
+        self.worker.set_compactconnect_video_gain.assert_called_once_with(200)
         self.worker.set_compactconnect_anti_flicker.assert_not_called()
         self.worker.set_video_display_settings.assert_not_called()
-        self.assertFalse(self.panel.write_video_gain_button.isEnabled())
 
-    def test_cancelled_anti_flicker_confirmation_never_queues_eeprom_write(self):
+    def test_anti_flicker_change_is_queued_immediately_without_confirmation(self):
+        self.worker.reset_mock()
         index = self.panel.compactconnect_anti_flicker.findData(2)
         self.panel.compactconnect_anti_flicker.setCurrentIndex(index)
-        with patch(
-            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
-            return_value=QMessageBox.StandardButton.No,
-        ):
-            self.assertFalse(self.panel.apply_compactconnect_anti_flicker())
-        self.worker.set_compactconnect_anti_flicker.assert_not_called()
 
-    def test_confirmed_anti_flicker_is_queued_separately(self):
-        index = self.panel.compactconnect_anti_flicker.findData(2)
-        self.panel.compactconnect_anti_flicker.setCurrentIndex(index)
-        with patch(
-            "plugins.devices.ctvideo_3m.panel_video.QMessageBox.warning",
-            return_value=QMessageBox.StandardButton.Yes,
-        ):
-            self.assertTrue(self.panel.apply_compactconnect_anti_flicker())
-        self.worker.set_compactconnect_anti_flicker.assert_called_once_with(
-            2, confirmed=True
-        )
+        self.worker.set_compactconnect_anti_flicker.assert_called_once_with(2)
         self.worker.set_compactconnect_video_gain.assert_not_called()
         self.worker.set_video_display_settings.assert_not_called()
-        self.assertFalse(self.panel.write_anti_flicker_button.isEnabled())
+
+    def test_stale_gain_readback_does_not_replace_newer_input(self):
+        self.worker.reset_mock()
+        self.panel.compactconnect_video_gain.setValue(190)
+        self.panel.compactconnect_video_gain.setValue(200)
+
+        self.panel.update_camera_properties({
+            "operation": "video_gain_apply",
+            "controls": {
+                "CompactConnect Video Gain": {
+                    "supported": True,
+                    "requested": 190,
+                    "current": 190,
+                    "applied": True,
+                },
+            },
+        })
+
+        self.assertEqual(self.panel.compactconnect_video_gain.value(), 200)
+        self.assertEqual(self.panel._latest_vendor_gain_request, 200)
 
 
 if __name__ == "__main__":

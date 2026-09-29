@@ -5,12 +5,74 @@ from pathlib import Path
 
 from core.plugin_manager import (
     _migrate_legacy_bundled_plugins, _seed_plugins,
+    _update_versioned_bundled_plugins,
     export_experiment_plugin, import_experiment_plugin,
     load_experiment_plugins,
 )
 
 
 class TestUserExperimentPlugins(unittest.TestCase):
+    def test_newer_bundled_device_updates_old_copy_and_keeps_backup(self):
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
+            source = Path(source_directory)
+            destination = Path(destination_directory)
+            source_plugin = source / "devices" / "camera"
+            target_plugin = destination / "devices" / "camera"
+            source_plugin.mkdir(parents=True)
+            target_plugin.mkdir(parents=True)
+            (source_plugin / "plugin.json").write_text(
+                json.dumps({"id": "camera", "bundled_version": 1}),
+                encoding="utf-8",
+            )
+            (target_plugin / "plugin.json").write_text(
+                json.dumps({"id": "camera"}), encoding="utf-8"
+            )
+            (source_plugin / "panel.py").write_text("new", encoding="utf-8")
+            (target_plugin / "panel.py").write_text("old", encoding="utf-8")
+
+            _update_versioned_bundled_plugins(source, destination)
+
+            self.assertEqual(
+                (target_plugin / "panel.py").read_text(encoding="utf-8"), "new"
+            )
+            self.assertEqual(
+                (target_plugin / "panel.py.bundled-v0.backup").read_text(
+                    encoding="utf-8"
+                ),
+                "old",
+            )
+
+    def test_newer_bundled_plugin_updates_old_copy_and_keeps_backup(self):
+        with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
+            source = Path(source_directory)
+            destination = Path(destination_directory)
+            source_plugin = source / "experiments" / "sample"
+            target_plugin = destination / "experiments" / "sample"
+            source_plugin.mkdir(parents=True)
+            target_plugin.mkdir(parents=True)
+            (source_plugin / "plugin.json").write_text(
+                json.dumps({"id": "sample", "bundled_version": 2}),
+                encoding="utf-8",
+            )
+            (target_plugin / "plugin.json").write_text(
+                json.dumps({"id": "sample", "bundled_version": 1}),
+                encoding="utf-8",
+            )
+            (source_plugin / "panel.py").write_text("new", encoding="utf-8")
+            (target_plugin / "panel.py").write_text("old", encoding="utf-8")
+
+            _update_versioned_bundled_plugins(source, destination)
+
+            self.assertEqual(
+                (target_plugin / "panel.py").read_text(encoding="utf-8"), "new"
+            )
+            self.assertEqual(
+                (target_plugin / "panel.py.bundled-v1.backup").read_text(
+                    encoding="utf-8"
+                ),
+                "old",
+            )
+
     def test_obsolete_ctvideo_panel_is_backed_up_and_migrated(self):
         with TemporaryDirectory() as source_directory, TemporaryDirectory() as destination_directory:
             source = Path(source_directory)

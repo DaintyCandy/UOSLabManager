@@ -1,5 +1,13 @@
 import os
 import sys
+from pathlib import Path
+
+# PyInstaller keeps plug-ins as editable source beside the executable. Put that
+# directory ahead of the frozen module archive before importing application code.
+if getattr(sys, "frozen", False):
+    executable_dir = str(Path(sys.executable).resolve().parent)
+    if executable_dir not in sys.path:
+        sys.path.insert(0, executable_dir)
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication

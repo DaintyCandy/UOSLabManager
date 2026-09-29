@@ -5,13 +5,14 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
+    QComboBox, QFileDialog, QFormLayout, QLabel, QMessageBox,
+    QPushButton, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout,
     QWidget,
 )
+from gui.layout_mode import AdaptivePanelMixin, AdaptiveRowLayout, AdaptiveSplitter
 
 
-class LineProfilePanel(QWidget):
+class LineProfilePanel(AdaptivePanelMixin, QWidget):
     """Analyze horizontal intensity profiles without owning the camera."""
 
     def __init__(self, manager, parent=None):
@@ -24,18 +25,19 @@ class LineProfilePanel(QWidget):
         ))
         self.play_index = 0
         self.last_frame_identity = None
+        self.active = False
         self._build_ui()
         self.capture_timer = QTimer(self)
         self.capture_timer.timeout.connect(self.capture_profile)
-        self.capture_timer.start(self.interval_spin.value())
         self.animation_timer = QTimer(self)
         self.animation_timer.timeout.connect(self.advance_animation)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        controls = QHBoxLayout()
+        controls = AdaptiveRowLayout(compact_columns=2)
         self.camera_combo = QComboBox()
         self.camera_combo.addItems(["Camera 1", "Camera 2"])
+        self.camera_combo.currentIndexChanged.connect(self._route_selected_camera)
         controls.addWidget(QLabel("Source"))
         controls.addWidget(self.camera_combo)
 
@@ -68,7 +70,7 @@ class LineProfilePanel(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        buttons = QHBoxLayout()
+        buttons = AdaptiveRowLayout(compact_columns=2)
         for text, callback in (
             ("Load NPY", self.load_npy), ("Save NPY", self.save_npy),
             ("Play", self.toggle_animation), ("Clear", self.clear),
@@ -82,8 +84,9 @@ class LineProfilePanel(QWidget):
         buttons.addWidget(self.status, 1)
         layout.addLayout(buttons)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.camera_preview = QLabel("Start preview in the Camera tab")
+        splitter = AdaptiveSplitter()
+        self.splitter = splitter
+        self.camera_preview = QLabel("The shared camera stream opens automatically")
         self.camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_preview.setMinimumWidth(360)
         self.camera_preview.setSizePolicy(
@@ -109,20 +112,24 @@ class LineProfilePanel(QWidget):
         splitter.setSizes([500, 700])
         layout.addWidget(splitter, 1)
 
+    def set_layout_mode(self, mode):
+        super().set_layout_mode(mode)
+        self.camera_preview.setMinimumWidth(0 if mode == "compact" else 360)
+        self.camera_preview.setMinimumHeight(240 if mode == "compact" else 0)
+        self.profile_plot.setMinimumHeight(240 if mode == "compact" else 0)
+
     def _camera_workspace(self):
-        return getattr(self.host, "camera_panel", None)
+        return getattr(self.manager, "cameras", None)
 
     def capture_profile(self):
         workspace = self._camera_workspace()
         if workspace is None:
             self.status.setText("Camera workspace is unavailable")
             return
-        frame, sequence = workspace.get_frame_packet(
-            self.camera_combo.currentIndex()
-        )
+        borrow = getattr(workspace, "borrow_frame_packet", workspace.frame_packet)
+        frame, sequence = borrow(self.camera_combo.currentIndex())
         if frame is None:
-            self.status.setText("Start the selected camera preview")
-            self.camera_preview.setText("Preview is stopped")
+            self.status.setText("Opening the selected shared camera stream")
             return
         source_key = (self.camera_combo.currentIndex(), sequence)
         if source_key == self.last_frame_identity:
@@ -133,7 +140,6 @@ class LineProfilePanel(QWidget):
         roi_height = max(1, round(height * self.roi_height.value() / 100))
         top = max(0, center - roi_height // 2)
         bottom = min(height, top + roi_height)
-        self._show_frame(frame, top, bottom)
         roi = np.asarray(frame[top:bottom])
         if roi.ndim == 3:
             roi = (
@@ -225,6 +231,28 @@ class LineProfilePanel(QWidget):
         if hasattr(self, "capture_timer"):
             self.capture_timer.setInterval(int(interval_ms))
 
+    def _route_selected_camera(self, _index=None):
+        if not self.active:
+            return
+        workspace = self._camera_workspace()
+        if workspace is not None and hasattr(workspace, "route_preview"):
+            workspace.release_preview(self)
+            workspace.route_preview(
+                self.camera_preview, self.camera_combo.currentIndex(), self
+            )
+
+    def activate(self):
+        self.active = True
+        self._route_selected_camera()
+        self.capture_timer.start(self.interval_spin.value())
+
+    def deactivate(self):
+        self.active = False
+        self.capture_timer.stop()
+        workspace = self._camera_workspace()
+        if workspace is not None and hasattr(workspace, "release_preview"):
+            workspace.release_preview(self)
+
     def set_buffer_rows(self, rows):
         rows = max(10, int(rows))
         self.profiles = deque(self.profiles, maxlen=rows)
@@ -238,5 +266,5 @@ class LineProfilePanel(QWidget):
         self.status.setText("Cleared")
 
     def shutdown(self):
-        self.capture_timer.stop()
+        self.deactivate()
         self.animation_timer.stop()

@@ -214,9 +214,27 @@ class TestCTVideoConnectionFactory(unittest.TestCase):
             result = connection.create_ctvideo("CTLV_21060012", verify=True)
 
         self.assertIs(result, device)
-        adapter_class.assert_called_once_with(selector="CTLV_21060012")
+        adapter_class.assert_called_once_with(
+            selector="CTLV_21060012", baudrate=115200, timeout=0.5
+        )
         driver_class.assert_called_once_with(transport=transport)
         device.read_all.assert_called_once_with()
+
+    @patch("plugins.devices.ctvideo_3m.connection.CTVideo3M")
+    @patch("plugins.devices.ctvideo_3m.connection.D2XXSerialAdapter")
+    def test_macos_factory_applies_editable_connection_settings(
+        self, adapter_class, driver_class
+    ):
+        adapter_class.return_value = MagicMock()
+
+        with patch.object(connection.sys, "platform", "darwin"):
+            connection.create_ctvideo(
+                "CTLV_TEST", baudrate=57600, timeout=1.25
+            )
+
+        adapter_class.assert_called_once_with(
+            selector="CTLV_TEST", baudrate=57600, timeout=1.25
+        )
 
     @patch("plugins.devices.ctvideo_3m.connection.CTVideo3M")
     @patch("plugins.devices.ctvideo_3m.connection.D2XXSerialAdapter")

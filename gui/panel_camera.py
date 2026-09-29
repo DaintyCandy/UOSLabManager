@@ -7,11 +7,12 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QSizePolicy, QSplitter,
+    QMessageBox, QSizePolicy,
     QStackedLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .widget_busy_spinner import BusySpinner
+from .layout_mode import AdaptiveRowLayout, AdaptiveSplitter, apply_panel_layout
 
 try:
     import cv2
@@ -61,6 +62,10 @@ class CameraPanel(QWidget):
         self.last_recorded_at = None
         self.preview_fps = None
         self.preview_active = False
+        self.external_worker = None
+        self.external_stream_name = ""
+        self.display_target = None
+        self.display_owner = None
         
         # --- [RHEED 1D 추출용 변수] ---
         self.latest_frame = None
@@ -74,7 +79,7 @@ class CameraPanel(QWidget):
         body = QVBoxLayout(group)
         
         # 1. 상단 소스 및 FPS
-        options = QHBoxLayout()
+        options = AdaptiveRowLayout(compact_columns=2)
         options.addWidget(QLabel("Source:"))
         self.source_input = QLineEdit(self.default_source)
         self.source_input.setFixedWidth(50)
@@ -123,6 +128,7 @@ class CameraPanel(QWidget):
         # 3. 프리뷰 화면
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.preview.setStyleSheet("background:#000; color:#777; border:2px inset #555;")
         self.set_standby_preview()
         self.preview_stack.addWidget(self.preview)
@@ -134,6 +140,7 @@ class CameraPanel(QWidget):
         loading_layout.addStretch()
         self.preview_stack.addWidget(self.loading_page)
         self.preview_stack.setCurrentWidget(self.preview)
+        self.display_target = self.preview
         body.addWidget(self.preview_container, 1)
         recording_controls = QHBoxLayout()
         recording_controls.addStretch()
@@ -211,6 +218,10 @@ class CameraPanel(QWidget):
         if cv2 is None:
             QMessageBox.critical(self, "Camera Error", "OpenCV is not installed.")
             return False
+        if self.external_worker is not None:
+            self.preview_active = True
+            self.set_preview_switch(True)
+            return True
         if self.camera_worker is not None and self.camera_worker.isRunning():
             self.preview_active = True
             self.set_preview_switch(True)
@@ -245,16 +256,24 @@ class CameraPanel(QWidget):
         self.preview_stack.setCurrentWidget(self.preview)
 
     def handle_camera_error(self, message):
+        sender = self.sender()
+        if sender is not None and sender is not self.camera_worker:
+            return
         self.log(message)
         self.preview_active = False
         self.set_preview_switch(False)
         self.stop_recording()
+        target = self.display_target or self.preview
+        target.clear()
+        target.setText(message)
         self.preview.clear()
         self.set_standby_preview()
         self.preview_stack.setCurrentWidget(self.preview)
 
     def camera_worker_finished(self):
         worker = self.sender()
+        if worker is not self.camera_worker:
+            return
         was_active = self.preview_active
         self.preview_active = False
         if self.camera_worker is worker:
@@ -266,6 +285,9 @@ class CameraPanel(QWidget):
             self.preview_fps = None
             self.frame_status_label.setText("Frame: -")
             self.latest_profile = None
+            target = self.display_target or self.preview
+            target.clear()
+            target.setText("Camera stream stopped")
             self.preview.clear()
             self.set_standby_preview()
             self.preview_stack.setCurrentWidget(self.preview)
@@ -391,17 +413,113 @@ class CameraPanel(QWidget):
         else:
             self.latest_profile = None
 
+        self._render_frame(frame)
+
+    def _render_frame(self, frame):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width = rgb.shape[:2]
         # 추출 영역을 녹색 박스로 렌더링 (사용자 시각적 확인용)
         # --------------------------------------------------------
 
         bytes_per_line = 3 * width
         image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        target = self.display_target or self.preview
+        # Label borders are outside the drawable area. Scaling to size() makes
+        # a pixmap's size hint exceed that area and can grow the layout per frame.
+        render_size = target.contentsRect().size()
+        if render_size.isEmpty():
+            return
         pixmap = QPixmap.fromImage(image).scaled(
-            self.preview.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+            render_size, Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.preview.setPixmap(pixmap)
+        target.setPixmap(pixmap)
+
+    def attach_external_stream(self, worker, name="Shared camera"):
+        """Use an already-open capture worker instead of opening the camera again."""
+        if worker is self.external_worker:
+            self.preview_active = True
+            self.set_preview_switch(True)
+            return
+        if self.camera_worker is not None:
+            internal = self.camera_worker
+            for signal, callback in (
+                (internal.frame_ready, self.update_frame),
+                (internal.camera_error, self.handle_camera_error),
+                (internal.finished, self.camera_worker_finished),
+            ):
+                try:
+                    signal.disconnect(callback)
+                except (TypeError, RuntimeError):
+                    pass
+            internal.requestInterruption()
+            internal.wait(1500)
+            if self.camera_worker is internal:
+                self.camera_worker = None
+        if self.external_worker is not None:
+            self._disconnect_external_stream(self.external_worker)
+        self.external_worker = worker
+        self.external_stream_name = str(name)
+        worker.frame_ready.connect(self.update_frame)
+        worker.finished.connect(self.external_stream_finished)
+        self.preview_active = True
+        self.set_preview_switch(True)
+        self.preview_stack.setCurrentWidget(self.preview)
+        self.log(f"Camera source switched to shared stream: {self.external_stream_name}")
+
+    def detach_external_stream(self, worker):
+        if worker is not self.external_worker:
+            return
+        self._disconnect_external_stream(worker)
+        self.preview_active = False
+        self.set_preview_switch(False)
+        target = self.display_target or self.preview
+        target.clear()
+        target.setText("Shared camera stream stopped")
+
+    def _disconnect_external_stream(self, worker):
+        for signal, callback in (
+            (worker.frame_ready, self.update_frame),
+            (worker.finished, self.external_stream_finished),
+        ):
+            try:
+                signal.disconnect(callback)
+            except (TypeError, RuntimeError):
+                pass
+        if self.external_worker is worker:
+            self.external_worker = None
+            self.external_stream_name = ""
+
+    def external_stream_finished(self):
+        worker = self.sender()
+        if worker is self.external_worker:
+            self.detach_external_stream(worker)
+
+    def route_display(self, target, owner):
+        """Render the single live stream in the active plug-in's video label."""
+        if not self.preview_active:
+            target.clear()
+            target.setText("Turn on Preview in the Camera tab first")
+            return False
+        self.display_target = target
+        self.display_owner = owner
+        target.clear()
+        if self.latest_frame is not None:
+            self._render_frame(self.latest_frame)
+        else:
+            target.setText("Waiting for the active camera stream...")
+        return True
+
+    def release_display(self, owner):
+        if owner is None or owner is not self.display_owner:
+            return
+        self.display_owner = None
+        self.display_target = self.preview
+        self.preview.clear()
+        if self.latest_frame is not None and self.preview_active:
+            self._render_frame(self.latest_frame)
+        elif not self.preview_active:
+            self.set_standby_preview()
 
     def write_frame(self, frame):
         if self.writer is None:
@@ -425,10 +543,11 @@ class CameraPanel(QWidget):
     def get_latest_frame(self):
         return None if self.latest_frame is None else self.latest_frame.copy()
 
-    def get_frame_packet(self):
+    def get_frame_packet(self, *, copy=True):
         if not self.preview_active or self.latest_frame is None:
             return None, self.frame_sequence
-        return self.latest_frame.copy(), self.frame_sequence
+        frame = self.latest_frame.copy() if copy else self.latest_frame
+        return frame, self.frame_sequence
 
 
 class CameraWorkspace(QWidget):
@@ -450,7 +569,7 @@ class CameraWorkspace(QWidget):
         self.split_button.toggled.connect(self.set_split_view)
         controls.addWidget(self.split_button)
         layout.addLayout(controls)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = AdaptiveSplitter()
         self.splitter.setHandleWidth(0)
         self.splitter.setChildrenCollapsible(False)
         self.primary = CameraPanel(output_dir, self.camera_log, "0", "Camera 1")
@@ -486,7 +605,10 @@ class CameraWorkspace(QWidget):
         self.camera_log(f"Camera save folder changed: {path}")
 
     def set_split_view(self, enabled):
-        minimum_width = 440 if enabled else 0
+        minimum_width = (
+            440 if enabled and self.splitter.orientation() == Qt.Orientation.Horizontal
+            else 0
+        )
         self.primary.setMinimumWidth(minimum_width)
         self.secondary.setMinimumWidth(minimum_width)
         self.secondary.setVisible(enabled)
@@ -494,6 +616,13 @@ class CameraWorkspace(QWidget):
         self.split_button.setToolTip("Merge camera view" if enabled else "Split camera view")
         if enabled:
             self.splitter.setSizes([1, 1])
+
+    def set_layout_mode(self, mode):
+        apply_panel_layout(self, mode)
+        enabled = self.split_button.isChecked()
+        for panel in (self.primary, self.secondary):
+            panel.setMinimumWidth(440 if enabled and mode == "wide" else 0)
+        self.layout_mode = mode
 
     def stop_preview(self):
         self.primary.stop_preview()
@@ -510,3 +639,31 @@ class CameraWorkspace(QWidget):
     def get_frame_packet(self, camera_index=0):
         panel = self.primary if int(camera_index) == 0 else self.secondary
         return panel.get_frame_packet()
+
+    def borrow_frame_packet(self, camera_index=0):
+        """Borrow the current GUI-thread frame without making another copy."""
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        return panel.get_frame_packet(copy=False)
+
+    def route_preview(self, target, camera_index=0, owner=None):
+        route_owner = owner if owner is not None else target
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        if panel.display_owner is not None and panel.display_owner is not route_owner:
+            panel.release_display(panel.display_owner)
+        return panel.route_display(target, route_owner)
+
+    def release_preview(self, owner):
+        self.primary.release_display(owner)
+        self.secondary.release_display(owner)
+
+    def show_camera_workspace(self):
+        self.primary.release_display(self.primary.display_owner)
+        self.secondary.release_display(self.secondary.display_owner)
+
+    def attach_external_stream(self, worker, camera_index=0, name="Shared camera"):
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        panel.attach_external_stream(worker, name)
+
+    def detach_external_stream(self, worker, camera_index=0):
+        panel = self.primary if int(camera_index) == 0 else self.secondary
+        panel.detach_external_stream(worker)
