@@ -4,9 +4,10 @@ from PyQt6.QtWidgets import (
 )
 
 from .widget_busy_spinner import run_busy_task
+from .layout_mode import AdaptivePanelMixin
 
 
-class DeviceSettingsPanel(QWidget):
+class DeviceSettingsPanel(AdaptivePanelMixin, QWidget):
     """Basic connection panel used when a device has no advanced UI."""
 
     def __init__(self, manager, plugin, parent=None):

@@ -5,13 +5,14 @@ import pyqtgraph as pg
 from PyQt6.QtCore import QSettings, Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QComboBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QMessageBox,
-    QPushButton, QSizePolicy, QSpinBox, QSplitter, QTabWidget, QVBoxLayout,
+    QComboBox, QFileDialog, QFormLayout, QLabel, QMessageBox,
+    QPushButton, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout,
     QWidget,
 )
+from gui.layout_mode import AdaptivePanelMixin, AdaptiveRowLayout, AdaptiveSplitter
 
 
-class LineProfilePanel(QWidget):
+class LineProfilePanel(AdaptivePanelMixin, QWidget):
     """Analyze horizontal intensity profiles without owning the camera."""
 
     def __init__(self, manager, parent=None):
@@ -33,7 +34,7 @@ class LineProfilePanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        controls = QHBoxLayout()
+        controls = AdaptiveRowLayout(compact_columns=2)
         self.camera_combo = QComboBox()
         self.camera_combo.addItems(["Camera 1", "Camera 2"])
         self.camera_combo.currentIndexChanged.connect(self._route_selected_camera)
@@ -69,7 +70,7 @@ class LineProfilePanel(QWidget):
         controls.addStretch()
         layout.addLayout(controls)
 
-        buttons = QHBoxLayout()
+        buttons = AdaptiveRowLayout(compact_columns=2)
         for text, callback in (
             ("Load NPY", self.load_npy), ("Save NPY", self.save_npy),
             ("Play", self.toggle_animation), ("Clear", self.clear),
@@ -83,7 +84,8 @@ class LineProfilePanel(QWidget):
         buttons.addWidget(self.status, 1)
         layout.addLayout(buttons)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = AdaptiveSplitter()
+        self.splitter = splitter
         self.camera_preview = QLabel("The shared camera stream opens automatically")
         self.camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.camera_preview.setMinimumWidth(360)
@@ -109,6 +111,12 @@ class LineProfilePanel(QWidget):
         splitter.addWidget(tabs)
         splitter.setSizes([500, 700])
         layout.addWidget(splitter, 1)
+
+    def set_layout_mode(self, mode):
+        super().set_layout_mode(mode)
+        self.camera_preview.setMinimumWidth(0 if mode == "compact" else 360)
+        self.camera_preview.setMinimumHeight(240 if mode == "compact" else 0)
+        self.profile_plot.setMinimumHeight(240 if mode == "compact" else 0)
 
     def _camera_workspace(self):
         return getattr(self.manager, "cameras", None)

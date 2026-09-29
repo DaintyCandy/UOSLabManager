@@ -38,11 +38,14 @@ class LicensingTests(unittest.TestCase):
         self.assertIn("third_party_license_files", spec)
         self.assertIn("numpy", requirements.splitlines())
 
-    def test_main_window_has_about_and_full_license_actions(self):
-        source = (ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+    def test_settings_contains_about_and_full_license_documents(self):
+        source = (ROOT / "gui" / "panel_settings.py").read_text(encoding="utf-8")
         ast.parse(source)
-        self.assertIn("About UOSLabManager", source)
-        self.assertIn("License and third-party notices", source)
+        self.assertIn("<h3>UOSLabManager</h3>", source)
+        self.assertIn("GNU GPL version 3 or later", source)
+        self.assertIn('resource_path(name).read_text(encoding="utf-8")', source)
+        self.assertIn('("LICENSE", "License")', source)
+        self.assertIn('("THIRD_PARTY_NOTICES.md", "Third-party notices")', source)
         self.assertIn("absolutely no warranty", source)
 
 

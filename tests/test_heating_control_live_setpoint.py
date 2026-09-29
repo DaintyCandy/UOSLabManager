@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -40,6 +41,8 @@ class HeatingControlLiveSetpointTests(unittest.TestCase):
         config = {
             "target_temperature": 300.0,
             "max_temperature": 500.0,
+            "current_ramp_enabled": True,
+            "current_ramp_rate": 0.1,
         }
         self.worker = HeatingPIDWorker(self.manager, config, self.panel)
         self.panel.control_worker = self.worker
@@ -154,6 +157,81 @@ class HeatingControlLiveSetpointTests(unittest.TestCase):
         self.panel.apply_running_setpoint()
 
         self.assertEqual(self.worker.get_target_temperature(), 350.0)
+
+    def test_ramp_controls_remain_enabled_while_safety_and_pid_settings_lock(self):
+        for widget in self.panel.control_setting_widgets:
+            widget.setEnabled(False)
+        self.assertTrue(self.panel.current_ramp_enabled.isEnabled())
+        self.assertTrue(self.panel.current_ramp_rate.isEnabled())
+        self.assertTrue(self.panel.apply_ramp_button.isEnabled())
+        self.assertFalse(self.panel.control_current_limit.isEnabled())
+        self.assertFalse(self.panel.max_temperature.isEnabled())
+        self.assertFalse(self.panel.pid_p.isEnabled())
+
+    def test_apply_ramp_changes_running_worker_without_restarting_or_writing_output(self):
+        self.panel.current_ramp_rate.setValue(0.25)
+        self.assertEqual(self.worker.get_current_ramp(), (True, 0.1))
+        self.manager.devices["ZUP"] = Mock()
+        with patch.object(self.worker, "start") as start:
+            self.panel.apply_ramp_button.click()
+            self.assertEqual(self.worker.get_current_ramp(), (True, 0.25))
+            self.panel.current_ramp_enabled.setChecked(False)
+            self.panel.apply_ramp_button.click()
+            self.assertEqual(self.worker.get_current_ramp(), (False, 0.25))
+            start.assert_not_called()
+        self.assertEqual(self.worker.config["max_temperature"], 500.0)
+        self.assertEqual(self.manager.devices["ZUP"].mock_calls, [])
+
+    def test_invalid_ramp_values_leave_previous_settings_intact(self):
+        for rate in (float("nan"), float("inf"), -1, 0, 0.0001, 12.1, True):
+            with self.subTest(rate=rate), self.assertRaises(ValueError):
+                self.worker.set_current_ramp(True, rate)
+        self.assertEqual(self.worker.get_current_ramp(), (True, 0.1))
+
+    def test_ramp_apply_when_stopped_only_leaves_settings_for_next_start(self):
+        self.panel.control_active = False
+        self.panel.current_ramp_rate.setValue(0.5)
+        self.panel.apply_running_ramp()
+        self.assertEqual(self.worker.get_current_ramp(), (True, 0.1))
+
+    def test_live_rate_is_used_on_next_sample_in_both_current_directions(self):
+        worker = self.worker
+        worker.config.update(target_temperature=450.0, p=4.0, i=0.0, d=0.0,
+                             voltage_limit=12.0, current_limit=1.0, power_limit=12.0)
+        self.manager.latest["ZUP"] = {"voltage_V": 0.0, "current_A": 0.0, "power_W": 0.0}
+        device = Mock()
+        self.manager.devices["ZUP"] = device
+        commands = []
+
+        def command_current(value):
+            if value > 0:
+                commands.append(value)
+                if len(commands) == 1:
+                    worker.set_current_ramp(True, 0.25)
+                elif len(commands) == 2:
+                    worker.set_target_temperature(300.0)
+
+        device.set_current.side_effect = command_current
+        sample = 0
+
+        def metrics(_name):
+            nonlocal sample
+            sample += 1
+            return {"connected": True, "age_ms": 0, "updated_at": sample}
+
+        trips = []
+        worker.safety_tripped.connect(trips.append)
+        with patch.object(self.manager, "get_metrics", side_effect=metrics), \
+                patch.object(worker, "isInterruptionRequested", side_effect=lambda: len(commands) >= 3), \
+                patch.object(worker, "msleep"), \
+                patch("plugins.experiments.heating_control.panel.time.monotonic", side_effect=[0, 1, 2, 3]):
+            worker.run()  # Real control loop, mock devices only; no thread or output is started.
+        self.assertEqual(trips, [])
+        self.assertEqual(len(commands), 3)
+        for actual, expected in zip(commands, (0.1, 0.35, 0.1)):
+            self.assertAlmostEqual(actual, expected)
+        self.assertEqual(device.set_current.call_args.args, (0.0,))
+        device.output_off.assert_called()
 
     def test_sequence_completion_follows_live_setpoint(self):
         self.panel.target_temperature.setValue(350.0)

@@ -7,11 +7,12 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QSizePolicy, QSplitter,
+    QMessageBox, QSizePolicy,
     QStackedLayout, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .widget_busy_spinner import BusySpinner
+from .layout_mode import AdaptiveRowLayout, AdaptiveSplitter, apply_panel_layout
 
 try:
     import cv2
@@ -78,7 +79,7 @@ class CameraPanel(QWidget):
         body = QVBoxLayout(group)
         
         # 1. 상단 소스 및 FPS
-        options = QHBoxLayout()
+        options = AdaptiveRowLayout(compact_columns=2)
         options.addWidget(QLabel("Source:"))
         self.source_input = QLineEdit(self.default_source)
         self.source_input.setFixedWidth(50)
@@ -127,6 +128,7 @@ class CameraPanel(QWidget):
         # 3. 프리뷰 화면
         self.preview = QLabel()
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.preview.setStyleSheet("background:#000; color:#777; border:2px inset #555;")
         self.set_standby_preview()
         self.preview_stack.addWidget(self.preview)
@@ -422,8 +424,13 @@ class CameraPanel(QWidget):
         bytes_per_line = 3 * width
         image = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).copy()
         target = self.display_target or self.preview
+        # Label borders are outside the drawable area. Scaling to size() makes
+        # a pixmap's size hint exceed that area and can grow the layout per frame.
+        render_size = target.contentsRect().size()
+        if render_size.isEmpty():
+            return
         pixmap = QPixmap.fromImage(image).scaled(
-            target.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            render_size, Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         target.setPixmap(pixmap)
@@ -562,7 +569,7 @@ class CameraWorkspace(QWidget):
         self.split_button.toggled.connect(self.set_split_view)
         controls.addWidget(self.split_button)
         layout.addLayout(controls)
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = AdaptiveSplitter()
         self.splitter.setHandleWidth(0)
         self.splitter.setChildrenCollapsible(False)
         self.primary = CameraPanel(output_dir, self.camera_log, "0", "Camera 1")
@@ -598,7 +605,10 @@ class CameraWorkspace(QWidget):
         self.camera_log(f"Camera save folder changed: {path}")
 
     def set_split_view(self, enabled):
-        minimum_width = 440 if enabled else 0
+        minimum_width = (
+            440 if enabled and self.splitter.orientation() == Qt.Orientation.Horizontal
+            else 0
+        )
         self.primary.setMinimumWidth(minimum_width)
         self.secondary.setMinimumWidth(minimum_width)
         self.secondary.setVisible(enabled)
@@ -606,6 +616,13 @@ class CameraWorkspace(QWidget):
         self.split_button.setToolTip("Merge camera view" if enabled else "Split camera view")
         if enabled:
             self.splitter.setSizes([1, 1])
+
+    def set_layout_mode(self, mode):
+        apply_panel_layout(self, mode)
+        enabled = self.split_button.isChecked()
+        for panel in (self.primary, self.secondary):
+            panel.setMinimumWidth(440 if enabled and mode == "wide" else 0)
+        self.layout_mode = mode
 
     def stop_preview(self):
         self.primary.stop_preview()

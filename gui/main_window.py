@@ -1,14 +1,13 @@
-import os
-import sys
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtGui import QAction, QColor, QGuiApplication
+from PyQt6.QtGui import QColor, QGuiApplication
 from PyQt6.QtCore import QRect, QSettings, Qt, QTimer
 from PyQt6.QtWidgets import (
-    QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+    QBoxLayout, QHBoxLayout, QLabel,
+    QMainWindow, QMessageBox,
     QPushButton, QScrollArea, QSplitter, QSizePolicy, QTabBar, QTabWidget,
-    QTextBrowser, QToolButton, QVBoxLayout, QWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from core import (
@@ -22,6 +21,7 @@ from .panel_sequence import SequencePanel
 from .panel_settings import SettingsPanel
 from .plugin_studio import PluginStudioPanel
 from .widget_busy_spinner import run_busy_task, visible_busy_dialog
+from .layout_mode import apply_panel_layout, validate_layout_mode
 
 __all__ = ["MainWindow"]
 
@@ -29,12 +29,21 @@ __all__ = ["MainWindow"]
 class MainWindow(QMainWindow):
     """Main tab workspace with a compact status header."""
 
+    DEFAULT_WINDOW_SIZES = {"landscape": (1360, 800), "portrait": (800, 1360)}
+
     def __init__(self, theme_manager):
         super().__init__()
         self.theme_manager = theme_manager
         self.setWindowTitle("UOS Lab Manager")
-        self.resize(1360, 800)
         self.window_settings = QSettings("UOSLabManager", "UOSLabManager")
+        self.layout_preference = self.window_settings.value("appearance/layout_mode", "landscape")
+        if self.layout_preference not in self.DEFAULT_WINDOW_SIZES:
+            self.layout_preference = "landscape"
+            self.window_settings.setValue("appearance/layout_mode", self.layout_preference)
+        self.resize(*self.DEFAULT_WINDOW_SIZES[self.layout_preference])
+        self.layout_mode = "wide"
+        self._layout_mode_applied = False
+        self._sidebar_preferences = {"wide": True, "compact": False}
         self.manager = DeviceManager()
         self.plugins = load_device_plugins()
         self.experiment_plugins = load_experiment_plugins(strict=False)
@@ -44,61 +53,6 @@ class MainWindow(QMainWindow):
         self.experiment_tab_containers = {}
         self.settings_panel = None
         self._build_ui()
-        self._build_legal_menu()
-
-    def _build_legal_menu(self):
-        help_menu = self.menuBar().addMenu("Help")
-        about_action = QAction("About UOSLabManager", self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
-        license_action = QAction("License and third-party notices", self)
-        license_action.triggered.connect(self.show_licenses)
-        help_menu.addAction(license_action)
-
-    def show_about(self, _checked=False):
-        QMessageBox.about(
-            self,
-            "About UOSLabManager",
-            "<h3>UOSLabManager</h3>"
-            "<p>Copyright &copy; 2026 UOSLabManager contributors.</p>"
-            "<p>Free software licensed under "
-            "<b>GNU GPL version 3 or later</b>.</p>"
-            "<p>This program comes with absolutely no warranty. "
-            "See Help &gt; License and third-party notices for details.</p>"
-            "<p>Independent interoperability project; not affiliated with "
-            "or endorsed by equipment manufacturers.</p>"
-            '<p>Source: <a href="https://github.com/DaintyCandy/UOSLabManager">'
-            "github.com/DaintyCandy/UOSLabManager</a></p>",
-        )
-
-    @staticmethod
-    def _legal_resource(name):
-        root = Path(
-            getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1])
-        )
-        return root / name
-
-    def show_licenses(self, _checked=False):
-        sections = []
-        for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
-            path = self._legal_resource(name)
-            try:
-                contents = path.read_text(encoding="utf-8")
-            except OSError as error:
-                contents = f"Could not load {name}: {error}"
-            sections.append(f"===== {name} =====\n\n{contents}")
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("UOSLabManager license and notices")
-        dialog.resize(900, 700)
-        layout = QVBoxLayout(dialog)
-        viewer = QTextBrowser()
-        viewer.setPlainText("\n\n".join(sections))
-        layout.addWidget(viewer)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        dialog.exec()
 
     def _build_ui(self):
         self.measurement = MeasurementPanels(self.manager, self.plugins, self.log)
@@ -121,6 +75,7 @@ class MainWindow(QMainWindow):
 
         self.sequence_workspace = QWidget()
         sequence_layout = QHBoxLayout(self.sequence_workspace)
+        self.sequence_layout = sequence_layout
         sequence_layout.setContentsMargins(4, 4, 4, 4)
         sequence_layout.addWidget(self.sequence_panel, 2)
         sequence_layout.addWidget(self.measurement.log_widget, 1)
@@ -164,29 +119,32 @@ class MainWindow(QMainWindow):
             self.tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, None)
         self.tabs.setCurrentWidget(self.plugin_studio)
         central = QWidget()
+        # Wide plugin size hints must not prevent a manually selected narrow
+        # window. Individual pages can scroll while keeping their controls usable.
+        central.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        central.setMinimumWidth(640)
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(self._build_header())
-        # Keep the sidebar useful without making the top-level window wider
-        # than a 1920 px display at 125% Windows scaling.
-        self.dashboard.setMinimumWidth(180)
-        self.dashboard.setMaximumWidth(240)
+        self.dashboard.setMaximumHeight(280)
         self.sidebar_open = True
         body = QWidget()
-        body_layout = QHBoxLayout(body)
+        body_layout = QVBoxLayout(body)
+        self.body_layout = body_layout
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
         body_layout.addWidget(self.dashboard)
         toggle_strip = QWidget()
-        toggle_strip.setFixedWidth(18)
+        self.sidebar_toggle_strip = toggle_strip
+        toggle_strip.setFixedHeight(30)
         toggle_layout = QVBoxLayout(toggle_strip)
         toggle_layout.setContentsMargins(1, 0, 1, 0)
         self.sidebar_toggle_button = QToolButton()
-        self.sidebar_toggle_button.setText("◀")
-        self.sidebar_toggle_button.setToolTip("Collapse or expand the device panel")
-        self.sidebar_toggle_button.setFixedWidth(16)
-        self.sidebar_toggle_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.sidebar_toggle_button.setText("▲ 장비 및 실험")
+        self.sidebar_toggle_button.setToolTip("Collapse or expand device and experiment plugins")
+        self.sidebar_toggle_button.setFixedHeight(28)
+        self.sidebar_toggle_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.sidebar_toggle_button.setStyleSheet(
             "QToolButton { font-size:9pt; font-weight:bold; border:1px solid #777; "
             "border-radius:3px; background:palette(button); }"
@@ -195,12 +153,84 @@ class MainWindow(QMainWindow):
         self.sidebar_toggle_button.clicked.connect(self.toggle_sidebar)
         toggle_layout.addWidget(self.sidebar_toggle_button)
         body_layout.addWidget(toggle_strip)
-        body_layout.addWidget(self.tabs, 1)
+        self.tab_scroll_area = QScrollArea()
+        self.tab_scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.tab_scroll_area.setWidgetResizable(True)
+        self.tab_scroll_area.setWidget(self.tabs)
+        body_layout.addWidget(self.tab_scroll_area, 1)
         central_layout.addWidget(body, 1)
         self.setCentralWidget(central)
         self.apply_theme_to_panels(self.theme_manager.current_theme)
         self.update_device_status()
         self.restore_window_layout()
+        self.update_layout_mode()
+
+    def set_layout_preference(self, preference):
+        if preference not in self.DEFAULT_WINDOW_SIZES:
+            raise ValueError(f"Unknown layout preference: {preference!r}")
+        self.layout_preference = preference
+        self.window_settings.setValue("appearance/layout_mode", self.layout_preference)
+        if self.settings_panel is not None:
+            self.settings_panel.sync_layout_preference(preference)
+        self.update_layout_mode()
+        self.resize_to_layout_default()
+
+    def update_layout_mode(self):
+        self.apply_layout_mode("compact" if self.layout_preference == "portrait" else "wide")
+
+    def resize_to_layout_default(self):
+        """Resize once on selection; subsequent user resizes leave the mode alone."""
+        if self.isMaximized() or self.isFullScreen():
+            self.showNormal()
+        self.resize(*self.DEFAULT_WINDOW_SIZES[self.layout_preference])
+        self._fit_window_to_available_screen()
+
+    def _apply_plugin_layout_mode(self, panel):
+        handler = getattr(panel, "set_layout_mode", None)
+        if callable(handler):
+            try:
+                handler(self.layout_mode)
+            except Exception as error:
+                # An optional third-party UI hook must not stop other panels.
+                self.log(f"Plugin layout update failed ({type(panel).__name__}): {error}")
+
+    def apply_layout_mode(self, mode):
+        validate_layout_mode(mode)
+        if self._layout_mode_applied and mode == self.layout_mode:
+            return
+        self.layout_mode = mode
+        compact = mode == "compact"
+        self.dashboard.set_layout_mode(mode)
+        self.body_layout.setDirection(QBoxLayout.Direction.TopToBottom if compact
+                                      else QBoxLayout.Direction.LeftToRight)
+        self.sidebar_toggle_strip.setMinimumSize(0, 0)
+        self.sidebar_toggle_strip.setMaximumSize(16777215, 16777215)
+        self.sidebar_toggle_button.setMinimumSize(0, 0)
+        self.sidebar_toggle_button.setMaximumSize(16777215, 16777215)
+        if compact:
+            self.sidebar_toggle_strip.setFixedHeight(30)
+            self.sidebar_toggle_button.setFixedHeight(28)
+        else:
+            self.sidebar_toggle_strip.setFixedWidth(18)
+            self.sidebar_toggle_button.setFixedWidth(16)
+        self.sidebar_toggle_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding if compact else QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Fixed if compact else QSizePolicy.Policy.Expanding,
+        )
+        self.sequence_layout.setDirection(
+            QBoxLayout.Direction.TopToBottom if compact
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self.set_sidebar_visible(self._sidebar_preferences[mode])
+        self.measurement.set_layout_mode(mode)
+        for panel in (self.sequence_panel, self.plugin_studio):
+            apply_panel_layout(panel, mode)
+        if self.settings_panel is not None:
+            apply_panel_layout(self.settings_panel, mode)
+        self.camera_panel.set_layout_mode(mode)
+        for panel in (*self.device_tabs.values(), *self.experiment_tabs.values()):
+            self._apply_plugin_layout_mode(panel)
+        self._layout_mode_applied = True
 
     def update_sequence_tab_state(self, running):
         index = self.tabs.indexOf(self.sequence_workspace)
@@ -292,6 +322,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(left_slot)
         layout.addStretch()
         self.clock_label = QLabel()
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.clock_label.setStyleSheet("font-size:12pt; font-weight:600;")
         layout.addWidget(self.clock_label)
         layout.addStretch()
@@ -321,19 +352,24 @@ class MainWindow(QMainWindow):
 
     def set_sidebar_visible(self, visible):
         self.sidebar_open = bool(visible)
+        self._sidebar_preferences[self.layout_mode] = self.sidebar_open
         self.dashboard.setVisible(self.sidebar_open)
-        self.sidebar_toggle_button.setText("◀" if self.sidebar_open else "▶")
+        self.sidebar_toggle_button.setText(
+            ("▲ 장비 및 실험" if self.sidebar_open else "▼ 장비 및 실험")
+            if self.layout_mode == "compact" else ("◀" if self.sidebar_open else "▶")
+        )
 
     def open_settings_tab(self, _checked=False):
         if self.settings_panel is None:
             self.settings_panel = SettingsPanel(
                 self.theme_manager, self.apply_theme_to_panels, self,
                 camera_workspace=self.camera_panel,
+                layout_preference=self.layout_preference,
+                layout_changed=self.set_layout_preference,
             )
-            index = self.tabs.addTab(self.settings_panel, "Settings")
-        else:
-            index = self.tabs.indexOf(self.settings_panel)
-        self.tabs.setCurrentIndex(index)
+            apply_panel_layout(self.settings_panel, self.layout_mode)
+            self.tabs.addTab(self.settings_panel, "Settings")
+        self.tabs.setCurrentWidget(self.settings_panel)
 
     def open_device_tab(self, device_id):
         plugin = self.plugins[device_id]
@@ -351,16 +387,15 @@ class MainWindow(QMainWindow):
                 )
                 return
             self.device_tabs[device_id] = panel
+            self._apply_plugin_layout_mode(panel)
             container = QScrollArea()
             container.setWidgetResizable(True)
             container.setWidget(panel)
             self.device_tab_containers[device_id] = container
-            index = self.tabs.addTab(container, f"{plugin.display_name} Settings")
-        else:
-            index = self.tabs.indexOf(self.device_tab_containers[device_id])
+            self.tabs.addTab(container, f"{plugin.display_name} Settings")
         if hasattr(panel, "sync_connection_status"):
             panel.sync_connection_status()
-        self.tabs.setCurrentIndex(index)
+        self.tabs.setCurrentWidget(self.device_tab_containers[device_id])
 
     def _resolve_experiment_panel(self, experiment_id, *, create=False):
         panel = self.experiment_tabs.get(experiment_id)
@@ -388,18 +423,15 @@ class MainWindow(QMainWindow):
                     self.log(message.replace("\n", " "))
                     return
                 self.experiment_tabs[experiment_id] = panel
+                self._apply_plugin_layout_mode(panel)
                 container = QScrollArea()
                 container.setWidgetResizable(True)
                 container.setWidget(panel)
                 self.experiment_tab_containers[experiment_id] = container
-                index = self.tabs.addTab(container, plugin.display_name)
-            else:
-                index = self.tabs.indexOf(
-                    self.experiment_tab_containers[experiment_id]
-                )
+                self.tabs.addTab(container, plugin.display_name)
             if hasattr(panel, "sync_connection_status"):
                 panel.sync_connection_status()
-            self.tabs.setCurrentIndex(index)
+            self.tabs.setCurrentWidget(self.experiment_tab_containers[experiment_id])
             return
         if self.sequence_panel.load_experiment(plugin):
             self.tabs.setCurrentWidget(self.sequence_workspace)
@@ -495,14 +527,8 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "dashboard") or not hasattr(self, "tabs"):
             return
         current = self.tabs.currentWidget()
-        active_id = next(
-            (
-                experiment_id
-                for experiment_id, container in self.experiment_tab_containers.items()
-                if container is current
-            ),
-            None,
-        )
+        active_id = next((experiment_id for experiment_id, container
+                          in self.experiment_tab_containers.items() if container is current), None)
         active_panel = self.experiment_tabs.get(active_id)
         previous_panel = getattr(self, "_active_experiment_panel", None)
         if previous_panel is not None and previous_panel is not active_panel:
@@ -520,7 +546,7 @@ class MainWindow(QMainWindow):
 
     def close_tab(self, index):
         container = self.tabs.widget(index)
-        if container in self.fixed_tabs:
+        if container is None or container in self.fixed_tabs:
             return
         self.tabs.removeTab(index)
         if container is self.settings_panel:
@@ -623,9 +649,14 @@ class MainWindow(QMainWindow):
         self.window_settings.setValue("splitter/data", self.data_workspace.saveState())
         self.window_settings.setValue("splitter/graphs", self.measurement.graph_splitter.saveState())
         self.window_settings.setValue("splitter/cameras", self.camera_panel.splitter.saveState())
+        for name, splitter in (("graphs", self.measurement.graph_splitter),
+                               ("cameras", self.camera_panel.splitter)):
+            for mode, sizes in splitter.mode_sizes().items():
+                self.window_settings.setValue(f"splitter/{name}/{mode}_sizes", sizes)
         self.window_settings.setValue("data/split_graph", self.measurement.split_graph_button.isChecked())
         self.window_settings.setValue("camera/split_view", self.camera_panel.split_button.isChecked())
-        self.window_settings.setValue("sidebar/open", self.sidebar_open)
+        self.window_settings.setValue("sidebar/open", self._sidebar_preferences["wide"])
+        self.window_settings.setValue("sidebar/compact_open", self._sidebar_preferences["compact"])
 
     def restore_window_layout(self):
         geometry = self.window_settings.value("window/geometry")
@@ -639,7 +670,16 @@ class MainWindow(QMainWindow):
             state = self.window_settings.value(key)
             if state is not None:
                 splitter.restoreState(state)
+        for name, splitter in (("graphs", self.measurement.graph_splitter),
+                               ("cameras", self.camera_panel.splitter)):
+            for mode in ("wide", "compact"):
+                sizes = self.window_settings.value(f"splitter/{name}/{mode}_sizes")
+                if sizes is not None:
+                    splitter.restore_mode_sizes(mode, sizes)
         sidebar_open = self.window_settings.value("sidebar/open", True, type=bool)
+        self._sidebar_preferences["compact"] = self.window_settings.value(
+            "sidebar/compact_open", False, type=bool,
+        )
         self.set_sidebar_visible(sidebar_open)
         split_graph = self.window_settings.value("data/split_graph", False, type=bool)
         self.measurement.split_graph_button.setChecked(split_graph)
@@ -680,7 +720,14 @@ class MainWindow(QMainWindow):
             screen = max(screens, key=overlap_area)
             if overlap_area(screen) <= 0:
                 screen = QGuiApplication.primaryScreen()
-        available = screen.availableGeometry()
-        bounded = self.bounded_window_geometry(rect, available)
+        frame = self.frameGeometry()
+        available = screen.availableGeometry().adjusted(
+            max(0, rect.left() - frame.left()), max(0, rect.top() - frame.top()),
+            -max(0, frame.right() - rect.right()), -max(0, frame.bottom() - rect.bottom()),
+        )
+        bounded = self.bounded_window_geometry(
+            rect, available,
+            minimum_width=1000 if self.layout_preference == "landscape" else 640,
+        )
         if bounded != rect:
             self.setGeometry(bounded)

@@ -1,9 +1,12 @@
 import unittest
+import tempfile
 
 import numpy as np
 import cv2
 from PyQt6.QtGui import QImage
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QScrollArea
+
+from gui.panel_camera import CameraWorkspace
 
 from plugins.experiments.MBE1.panel import ExperimentPanel, ScreenRecorderThread
 
@@ -96,6 +99,46 @@ class MbeMonitorTests(unittest.TestCase):
             ("heating_control", "ramp_to_setpoint", 400.0),
         )
         panel.shutdown()
+
+    def test_repeated_camera_frames_do_not_grow_views_or_scroll_area(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            context = Context()
+            context.cameras = CameraWorkspace(output_dir, lambda _message: None)
+            cameras = context.cameras
+            panel = ExperimentPanel(context)
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setWidget(panel)
+            cameras.primary.preview_active = True
+            cameras.secondary.preview_active = True
+            panel.activate()
+            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+            try:
+                for mode, size in (("wide", (1360, 800)), ("compact", (640, 1100))):
+                    with self.subTest(mode=mode):
+                        panel.set_layout_mode(mode)
+                        area.resize(*size)
+                        area.show()
+                        self.app.processEvents()
+                        dimensions = []
+                        for _ in range(60):
+                            cameras.primary.update_frame(frame)
+                            cameras.secondary.update_frame(frame)
+                            self.app.processEvents()
+                            dimensions.append((panel.size(), panel.camera_view.size(),
+                                               panel.pyrometer_view.size(),
+                                               area.verticalScrollBar().maximum()))
+                        self.assertEqual(dimensions[0], dimensions[-1])
+                        for view in (panel.camera_view, panel.pyrometer_view):
+                            self.assertLessEqual(view.pixmap().width(), view.contentsRect().width())
+                            self.assertLessEqual(view.pixmap().height(), view.contentsRect().height())
+            finally:
+                panel.shutdown()
+                cameras.stop_preview()
+                area.close()
+                area.deleteLater()
+                cameras.deleteLater()
+                self.app.processEvents()
 
     def test_screen_recorder_encodes_jpeg_without_qt_image_plugin(self):
         image = QImage(18, 10, QImage.Format.Format_RGB32)

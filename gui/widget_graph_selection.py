@@ -1,7 +1,8 @@
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QSizePolicy,
+    QCheckBox, QComboBox, QGroupBox, QLabel, QSizePolicy,
 )
+from .layout_mode import AdaptiveRowLayout
 
 
 class GraphSelectionTree(QGroupBox):
@@ -17,7 +18,7 @@ class GraphSelectionTree(QGroupBox):
             for plugin in plugins.values()
             for column in plugin.columns
         }
-        layout = QHBoxLayout(self)
+        layout = AdaptiveRowLayout(self, compact_columns=2)
         layout.setContentsMargins(8, 6, 8, 5)
         layout.setSpacing(6)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)

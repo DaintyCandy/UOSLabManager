@@ -60,6 +60,7 @@ a = Analysis(
         ('core/device_manager.py', '_codex_context/core'),
         ('core/plugin_manager.py', '_codex_context/core'),
         ('gui/panel_camera.py', '_codex_context/gui'),
+        ('gui/layout_mode.py', '_codex_context/gui'),
         *third_party_license_files,
         *codex_datas,
     ],

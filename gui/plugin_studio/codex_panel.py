@@ -20,11 +20,12 @@ from core.plugin_manager import (
 from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QTextOption
 from PyQt6.QtWidgets import (
-    QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
+    QComboBox, QInputDialog, QLabel, QLineEdit, QMessageBox,
     QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from .codex_presentation import should_display_codex_log
+from gui.layout_mode import AdaptiveRowLayout
 
 
 EDITABLE_SUFFIXES = {".py", ".json", ".md", ".txt"}
@@ -59,6 +60,12 @@ panels. Treat it as a compatibility contract, not a design suggestion.
 - End with one consistent action row: Read Device, Revert, Save Profile, Apply.
 - Let the host QScrollArea provide scrolling. Avoid fixed page widths and large
   minimum sizes.
+- Implement the optional `set_layout_mode(mode)` hook for `wide` / `compact`.
+  Stack summary/log and side-by-side settings in compact mode, retaining the
+  same widgets, snapshots, connections, and workers. The host calls the hook
+  after panel creation and on mode changes; never reconnect or reload a plugin.
+  Built-in helpers in `_CONTEXT/gui/layout_mode.py` are available via
+  `gui.layout_mode` (AdaptivePanelMixin, AdaptiveRowLayout, AdaptiveSplitter).
 
 ## Controls and status
 
@@ -108,6 +115,10 @@ EXPERIMENT_UI_STYLE_GUIDE = """# UOSLabManager experiment UI style contract
 
 - Use Qt layouts rather than absolute coordinates and let the host provide page
   scrolling. Avoid fixed page widths and unnecessarily large minimum sizes.
+- Implement the optional `set_layout_mode(mode)` hook (`wide` / `compact`).
+  Reflow grids/splitters in compact mode using the SAME widgets. Do not recreate
+  the panel, restart workers, change video sources, or lose experiment state.
+  See `_CONTEXT/gui/layout_mode.py` for opt-in helpers from `gui.layout_mode`.
 - Keep QWidget access on the GUI thread. Run blocking work through run_busy_task
   or a QThread and stop timers and threads in shutdown().
 - Preserve the existing panel's visual structure unless the user explicitly asks
@@ -457,25 +468,33 @@ class CodexPanel(QWidget):
         layout.setContentsMargins(4, 0, 0, 0)
         title = QLabel("Codex")
         title.setStyleSheet("font-size:13pt; font-weight:700;")
-        header = QHBoxLayout()
+        header = AdaptiveRowLayout(compact_columns=2)
         header.addWidget(title)
         header.addStretch()
-        header.addWidget(QLabel("Model"))
+        model_label = QLabel("Model")
+        header.addWidget(model_label)
         self.model_combo = QComboBox()
         self.model_combo.addItem("GPT-5.6 Terra", "gpt-5.6-terra")
         self.model_combo.addItem("GPT-5.6 Sol", "gpt-5.6-sol")
         self.model_combo.currentIndexChanged.connect(self._model_changed)
         header.addWidget(self.model_combo)
-        header.addWidget(QLabel("Reasoning"))
+        reasoning_label = QLabel("Reasoning")
+        header.addWidget(reasoning_label)
         self.reasoning_combo = QComboBox()
         for effort in self.REASONING_LEVELS:
             self.reasoning_combo.addItem(effort.capitalize(), effort)
         self.reasoning_combo.currentIndexChanged.connect(self._reasoning_changed)
         header.addWidget(self.reasoning_combo)
+        for widget, position in (
+            (title, (0, 0, 1, 2)),
+            (model_label, (1, 0)), (self.model_combo, (1, 1)),
+            (reasoning_label, (2, 0)), (self.reasoning_combo, (2, 1)),
+        ):
+            header.set_compact_position(widget, *position)
         self._set_reasoning_for_model(self.current_model())
         layout.addLayout(header)
 
-        auth_row = QHBoxLayout()
+        auth_row = AdaptiveRowLayout(compact_columns=3)
         self.auth_label = QLabel("Checking sign-in…")
         self.auth_label.setWordWrap(True)
         auth_row.addWidget(self.auth_label, 1)
@@ -520,7 +539,7 @@ class CodexPanel(QWidget):
         )
         self.prompt.setMaximumHeight(100)
         layout.addWidget(self.prompt)
-        send_row = QHBoxLayout()
+        send_row = AdaptiveRowLayout(compact_columns=3)
         self.send_button = QPushButton("Send")
         self.send_button.clicked.connect(self.send_prompt)
         send_row.addWidget(self.send_button)
@@ -1011,6 +1030,7 @@ class CodexPanel(QWidget):
             "core/device_manager.py",
             "core/plugin_manager.py",
             "gui/panel_camera.py",
+            "gui/layout_mode.py",
         )
         for relative_name in references:
             source = bundled_context_root / relative_name
@@ -1036,6 +1056,8 @@ class CodexPanel(QWidget):
         experiment_plugins = load_experiment_plugins(strict=False)
         resources = {
             "experiment_context_api_version": 1,
+            "layout_modes": ["wide", "compact"],
+            "panel_layout_hook": "set_layout_mode(mode)",
             "devices": {
                 device_id: {
                     "display_name": plugin.display_name,

@@ -7,8 +7,8 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QFileDialog, QHBoxLayout, QInputDialog, QLabel, QMessageBox, QPushButton,
-    QMenu, QSplitter, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QFileDialog, QInputDialog, QLabel, QMessageBox, QPushButton,
+    QMenu, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from core import (
@@ -17,6 +17,7 @@ from core import (
 )
 from .code_editor import CodeEditor
 from .codex_panel import CodexPanel
+from gui.layout_mode import AdaptiveRowLayout, AdaptiveSplitter
 
 PLUGIN_ROOT_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
@@ -41,7 +42,7 @@ class PluginStudioPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        toolbar = QHBoxLayout()
+        toolbar = AdaptiveRowLayout(compact_columns=3)
         title = QLabel("Plugin Studio")
         title.setStyleSheet("font-size:14pt; font-weight:700;")
         toolbar.addWidget(title)
@@ -60,7 +61,7 @@ class PluginStudioPanel(QWidget):
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = AdaptiveSplitter()
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Plugins")
         self.tree.setMinimumWidth(180)

@@ -20,6 +20,7 @@ from core.sequence_engine import (
     SYSTEM_COMMANDS, SYSTEM_DEVICE, SequenceEngine, SequenceState,
     describe_condition, format_duration, validate_wait_condition,
 )
+from .layout_mode import AdaptiveRowLayout
 
 
 @dataclass
@@ -158,7 +159,7 @@ class SequencePanel(QWidget):
             self.recipe_buttons.append(button)
         layout.addLayout(recipe_bar)
 
-        input_box = QHBoxLayout()
+        input_box = AdaptiveRowLayout(compact_columns=3)
         input_box.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.dev_combo = QComboBox()
         self.dev_combo.setFixedWidth(125)
