@@ -17,6 +17,7 @@ __pycache__/
 build/
 dist*/
 .codex-build/
+output/
 
 # Logs
 *.log
