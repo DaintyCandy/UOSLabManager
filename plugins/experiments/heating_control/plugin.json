@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "id": "heating_control",
-  "name": "Heating Control",
-  "type": "experiment",
-  "entrypoint": "plugin.py:plugin",
-  "enabled": true,
-  "api_version": "1"
-}
