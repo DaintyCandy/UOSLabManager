@@ -30,10 +30,9 @@ rheed_recordings/
 camera_recordings/
 *mp4
 
-# Local-only plug-ins. The public repository keeps only lakeshore331 and
-# line_profile as device/experiment examples.
+# Local-only plug-ins. The public repository keeps lakeshore331,
+# gpd3303s, and line_profile as device/experiment examples.
 plugins/devices/ctvideo_3m/
-plugins/devices/gpd3303s/
 plugins/devices/keithley2400/
 plugins/devices/zup36_12/
 plugins/devices/zup36_6/
